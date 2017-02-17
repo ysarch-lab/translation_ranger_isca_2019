@@ -91,6 +91,7 @@
 #include <linux/kcov.h>
 #include <linux/livepatch.h>
 #include <linux/thread_info.h>
+#include <linux/mem_defrag.h>
 
 #include <asm/pgtable.h>
 #include <asm/pgalloc.h>
@@ -429,6 +430,9 @@ static __latent_entropy int dup_mmap(struct mm_struct *mm,
 	if (retval)
 		goto out;
 	retval = khugepaged_fork(mm, oldmm);
+	if (retval)
+		goto out;
+	retval = kmem_defragd_fork(mm, oldmm);
 	if (retval)
 		goto out;
 
@@ -957,6 +961,7 @@ static inline void __mmput(struct mm_struct *mm)
 	exit_aio(mm);
 	ksm_exit(mm);
 	khugepaged_exit(mm); /* must run before exit_mmap */
+	kmem_defragd_exit(mm);
 	exit_mmap(mm);
 	mm_put_huge_zero_page(mm);
 	set_mm_exe_file(mm, NULL);
