@@ -3,6 +3,8 @@
 
 #include <linux/sched/coredump.h> /* MMF_VM_MEM_DEFRAG */
 
+#define MEM_DEFRAG_SCAN				0
+
 extern int __kmem_defragd_enter(struct mm_struct *mm);
 extern void __kmem_defragd_exit(struct mm_struct *mm);
 

@@ -16,6 +16,9 @@
 #include <linux/hashtable.h>
 #include <linux/mem_defrag.h>
 #include <linux/shmem_fs.h>
+#include <linux/syscalls.h>
+#include <linux/security.h>
+#include <linux/vmalloc.h>
 
 #include <asm/tlb.h>
 #include <asm/pgalloc.h>
@@ -208,6 +211,7 @@ static struct page* get_page_from_address(struct mm_struct *mm,
 {
 	struct page *page = NULL;
 	pgd_t *pgd;
+	p4d_t *p4d;
 	pud_t *pud;
 	pmd_t *pmdp;
 	pte_t *ptep, pteval;
@@ -216,7 +220,10 @@ static struct page* get_page_from_address(struct mm_struct *mm,
 	pgd = pgd_offset(mm, address);
 	if (!pgd_present(*pgd))
 		goto out;
-	pud = pud_offset(pgd, address);
+	p4d = p4d_offset(pgd, address);
+	if (!p4d_present(*p4d))
+		goto out;
+	pud = pud_offset(p4d, address);
 	if (!pud_present(*pud))
 		goto out;
 	pmdp = pmd_offset(pud, address);
@@ -250,18 +257,32 @@ out:
 	return page;
 }
 
+static void do_vma_stat(struct mm_struct *mm, struct vm_area_struct *vma,
+		char *kernel_buf, int pos, int* remain_buf_len)
+{
+	int used_len;
+
+	if (!*remain_buf_len || !kernel_buf)
+		return;
+
+	used_len = scnprintf(kernel_buf + pos, *remain_buf_len, "%p, %p, 0x%lx, "
+						 "0x%lx, -1\n",
+						 mm, vma, vma->vm_start, vma->vm_end);
+
+	*remain_buf_len -= used_len;
+}
+
 static void do_page_stat(struct mm_struct *mm, struct vm_area_struct *vma,
 		struct page *page, unsigned long vaddr,
-		char *stats_buf, int pos, int* remain_buf_len)
+		char *kernel_buf, int pos, int* remain_buf_len)
 {
-	char *kernel_buf;
 	int used_len;
 	struct anon_vma *anon_vma;
 
-	if (!*remain_buf_len)
+	if (!*remain_buf_len || !kernel_buf)
 		return;
 
-	used_len = scnprintf(kernel_buf + pos, *remain_buf_len, "%p, %p, %ld, %ld, "
+	used_len = scnprintf(kernel_buf + pos, *remain_buf_len, "%p, %p, 0x%lx, 0x%lx, "
 						 "0x%lx, 0x%llx",
 						 mm, vma, vma->vm_start, vma->vm_end,
 						 vaddr, page ? PFN_PHYS(page_to_pfn(page)) : 0);
@@ -273,9 +294,18 @@ static void do_page_stat(struct mm_struct *mm, struct vm_area_struct *vma,
 		return;
 
 	if (page && PageAnon(page)) {
+		/* check page order  */
+		used_len = scnprintf(kernel_buf + pos, *remain_buf_len, ", %d",
+							 compound_order(page));
+		*remain_buf_len -= used_len;
+		pos += used_len;
+
+		if (!*remain_buf_len)
+			return;
+
 		anon_vma = page_anon_vma(page);
 		if (!anon_vma)
-			return;
+			goto end_of_stat;
 		anon_vma_lock_read(anon_vma);
 
 		do {
@@ -291,9 +321,9 @@ static void do_page_stat(struct mm_struct *mm, struct vm_area_struct *vma,
 
 		anon_vma_unlock_read(anon_vma);
 	}
-
+end_of_stat:
 	/* end of one page stat  */
-	used_len = scnprintf(kernel_buf + pos, *remain_buf_len, ", 0\n");
+	used_len = scnprintf(kernel_buf + pos, *remain_buf_len, ", -1\n");
 	*remain_buf_len -= used_len;
 }
 
@@ -325,8 +355,16 @@ static unsigned int kmem_defragd_scan_mm(struct defrag_scan_control *sc)
 	struct mm_struct *mm = sc->mm;
 	struct vm_area_struct *vma;
 	unsigned long *scan_address = sc->scan_address;
-	char __user *stats_buf = sc->out_buf;
+	char *stats_buf = NULL;
 	int remain_buf_len = sc->buf_len;
+	int err = 0;
+
+
+	if (sc->buf_len) {
+		stats_buf = vzalloc(sc->buf_len);
+		if (!stats_buf)
+			goto breakouterloop_mmap_sem;
+	}
 
 	down_read(&mm->mmap_sem);
 	if (unlikely(kmem_defragd_test_exit(mm)))
@@ -341,6 +379,8 @@ static unsigned int kmem_defragd_scan_mm(struct defrag_scan_control *sc)
 		if (unlikely(kmem_defragd_test_exit(mm)))
 			break;
 		if (!mem_defrag_vma_check(vma)) {
+			do_vma_stat(mm, vma, stats_buf, sc->buf_len - remain_buf_len,
+						&remain_buf_len);
 skip:
 			continue;
 		}
@@ -380,12 +420,93 @@ skip:
 	}
 breakouterloop:
 	up_read(&mm->mmap_sem); /* exit_mmap will destroy ptes after this */
-/*breakouterloop_mmap_sem:*/
+breakouterloop_mmap_sem:
+
+	if (sc->buf_len)
+		err = copy_to_user(sc->out_buf, stats_buf, sc->buf_len);
+
+	if (stats_buf)
+		vfree(stats_buf);
 
 	/* 0: scan complete, 1: scan_incomplete  */
 	return vma == NULL ? 0 : 1;
 }
 
+SYSCALL_DEFINE4(scan_process_memory, pid_t, pid, char __user *, out_buf,
+				int, buf_len, int, action)
+{
+	const struct cred *cred = current_cred(), *tcred;
+	struct task_struct *task;
+	struct mm_struct *mm;
+	int err;
+	struct defrag_scan_control defrag_scan_control = {0};
+	unsigned long scan_address = 0;
+	struct mm_slot *iter;
+
+	/* Find the mm_struct */
+	rcu_read_lock();
+	task = pid ? find_task_by_vpid(pid) : current;
+	if (!task) {
+		rcu_read_unlock();
+		return -ESRCH;
+	}
+	get_task_struct(task);
+
+	/*
+	 * Check if this process has the right to modify the specified
+	 * process. The right exists if the process has administrative
+	 * capabilities, superuser privileges or the same
+	 * userid as the target process.
+	 */
+	tcred = __task_cred(task);
+	if (!uid_eq(cred->euid, tcred->suid) && !uid_eq(cred->euid, tcred->uid) &&
+	    !uid_eq(cred->uid,  tcred->suid) && !uid_eq(cred->uid,  tcred->uid) &&
+	    !capable(CAP_SYS_NICE)) {
+		rcu_read_unlock();
+		err = -EPERM;
+		goto out;
+	}
+	rcu_read_unlock();
+
+	err = security_task_movememory(task);
+	if (err)
+		goto out;
+
+	mm = get_task_mm(task);
+	put_task_struct(task);
+
+	if (!mm)
+		return -EINVAL;
+
+	switch (action) {
+		case MEM_DEFRAG_SCAN:
+			defrag_scan_control.mm = mm;
+			defrag_scan_control.scan_address = &scan_address;
+			defrag_scan_control.out_buf = out_buf;
+			defrag_scan_control.buf_len = buf_len;
+
+			kmem_defragd_scan_mm(&defrag_scan_control);
+			break;
+		default:
+			err = -EINVAL;
+			break;
+	}
+
+	list_for_each_entry(iter, &kmem_defragd_scan.mm_head, mm_node) {
+		struct task_struct *mm_task = iter->mm->owner;
+		pr_debug("mm_struct: 0x%p is in the list for pid: %d, tpid: %d\n",
+			iter->mm,
+			mm_task?mm_task->pid: -1,
+			mm_task?mm_task->tgid: -1);
+	}
+
+	mmput(mm);
+	return err;
+
+out:
+	put_task_struct(task);
+	return err;
+}
 
 static unsigned int kmem_defragd_scan_mm_slot(void)
 {
