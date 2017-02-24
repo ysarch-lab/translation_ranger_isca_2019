@@ -25,6 +25,7 @@
 #include "internal.h"
 
 
+int kmem_defragd_always;
 static DEFINE_SPINLOCK(kmem_defragd_mm_lock);
 
 #define MM_SLOTS_HASH_BITS 10
@@ -191,6 +192,10 @@ static void collect_mm_slot(struct mm_slot *mm_slot)
 
 static bool mem_defrag_vma_check(struct vm_area_struct *vma)
 {
+	if (!test_bit(MMF_VM_MEM_DEFRAG_ALL, &vma->vm_mm->flags) &&
+		((!(vma->vm_flags & VM_MEMDEFRAG) && !kmem_defragd_always) ||
+			(vma->vm_flags & VM_NOMEMDEFRAG)))
+			return false;
 	if (shmem_file(vma->vm_file)) {
 		if (!IS_ENABLED(CONFIG_TRANSPARENT_HUGE_PAGECACHE))
 			return false;

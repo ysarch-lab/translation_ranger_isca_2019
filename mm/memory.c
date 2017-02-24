@@ -69,6 +69,7 @@
 #include <linux/userfaultfd_k.h>
 #include <linux/dax.h>
 #include <linux/oom.h>
+#include <linux/mem_defrag.h>
 
 #include <asm/io.h>
 #include <asm/mmu_context.h>
@@ -3167,6 +3168,9 @@ static int do_anonymous_page(struct vm_fault *vmf)
 
 	/* Allocate our own private page. */
 	if (unlikely(anon_vma_prepare(vma)))
+		goto oom;
+	/* Make it defrag  */
+	if (unlikely(kmem_defragd_enter(vma, vma->vm_flags)))
 		goto oom;
 	page = alloc_zeroed_user_highpage_movable(vma, vmf->address);
 	if (!page)
