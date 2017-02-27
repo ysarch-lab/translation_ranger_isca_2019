@@ -492,6 +492,13 @@ SYSCALL_DEFINE4(scan_process_memory, pid_t, pid, char __user *, out_buf,
 
 			kmem_defragd_scan_mm(&defrag_scan_control);
 			break;
+		case MEM_DEFRAG_MARK_SCAN_ALL:
+			set_bit(MMF_VM_MEM_DEFRAG_ALL, &mm->flags);
+			__kmem_defragd_enter(mm);
+			break;
+		case MEM_DEFRAG_CLEAR_SCAN_ALL:
+			clear_bit(MMF_VM_MEM_DEFRAG_ALL, &mm->flags);
+			break;
 		default:
 			err = -EINVAL;
 			break;

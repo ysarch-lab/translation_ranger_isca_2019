@@ -4,6 +4,8 @@
 #include <linux/sched/coredump.h> /* MMF_VM_MEM_DEFRAG */
 
 #define MEM_DEFRAG_SCAN				0
+#define MEM_DEFRAG_MARK_SCAN_ALL	1
+#define MEM_DEFRAG_CLEAR_SCAN_ALL	2
 
 extern int kmem_defragd_always;
 
