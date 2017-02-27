@@ -24,6 +24,7 @@
 #include <linux/swapops.h>
 #include <linux/shmem_fs.h>
 #include <linux/mmu_notifier.h>
+#include <linux/mem_defrag.h>
 
 #include <asm/tlb.h>
 
@@ -615,6 +616,13 @@ static long madvise_remove(struct vm_area_struct *vma,
 	return error;
 }
 
+static long madvise_memdefrag(struct vm_area_struct *vma,
+		     struct vm_area_struct **prev,
+		     unsigned long start, unsigned long end, int behavior)
+{
+	*prev = vma;
+	return memdefrag_madvise(vma, &vma->vm_flags, behavior);
+}
 #ifdef CONFIG_MEMORY_FAILURE
 /*
  * Error injection support for memory error handling.
@@ -686,6 +694,9 @@ madvise_vma(struct vm_area_struct *vma, struct vm_area_struct **prev,
 	case MADV_FREE:
 	case MADV_DONTNEED:
 		return madvise_dontneed_free(vma, prev, start, end, behavior);
+	case MADV_MEMDEFRAG:
+	case MADV_NOMEMDEFRAG:
+		return madvise_memdefrag(vma, prev, start, end, behavior);
 	default:
 		return madvise_behavior(vma, prev, start, end, behavior);
 	}
@@ -720,6 +731,8 @@ madvise_behavior_valid(int behavior)
 	case MADV_SOFT_OFFLINE:
 	case MADV_HWPOISON:
 #endif
+	case MADV_MEMDEFRAG:
+	case MADV_NOMEMDEFRAG:
 		return true;
 
 	default:
@@ -774,6 +787,8 @@ madvise_behavior_valid(int behavior)
  *  MADV_DONTDUMP - the application wants to prevent pages in the given range
  *		from being included in its core dump.
  *  MADV_DODUMP - cancel MADV_DONTDUMP: no longer exclude from core dump.
+ *  MADV_MEMDEFRAG - allow mem defrag running on this region.
+ *  MADV_NOMEMDEFRAG - no mem defrag here.
  *
  * return values:
  *  zero    - success

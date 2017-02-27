@@ -63,6 +63,9 @@
 #define MADV_WIPEONFORK 18		/* Zero memory on fork, child only */
 #define MADV_KEEPONFORK 19		/* Undo MADV_WIPEONFORK */
 
+#define MADV_MEMDEFRAG	20		/* Worth backing with hugepages */
+#define MADV_NOMEMDEFRAG	21		/* Not worth backing with hugepages */
+
 /* compatibility flags */
 #define MAP_FILE	0
 

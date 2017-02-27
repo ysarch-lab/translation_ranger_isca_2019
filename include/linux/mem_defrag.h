@@ -11,6 +11,8 @@ extern int kmem_defragd_always;
 
 extern int __kmem_defragd_enter(struct mm_struct *mm);
 extern void __kmem_defragd_exit(struct mm_struct *mm);
+extern int memdefrag_madvise(struct vm_area_struct *vma,
+		     unsigned long *vm_flags, int advice);
 
 static inline int kmem_defragd_fork(struct mm_struct *mm, struct mm_struct *oldmm)
 {

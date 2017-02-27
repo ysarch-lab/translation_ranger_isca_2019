@@ -19,6 +19,7 @@
 #include <linux/syscalls.h>
 #include <linux/security.h>
 #include <linux/vmalloc.h>
+#include <linux/mman.h>
 
 #include <asm/tlb.h>
 #include <asm/pgalloc.h>
@@ -574,6 +575,34 @@ static unsigned int kmem_defragd_scan_mm_slot(void)
 	return 0;
 }
 
+int memdefrag_madvise(struct vm_area_struct *vma,
+		     unsigned long *vm_flags, int advice)
+{
+	switch (advice) {
+	case MADV_MEMDEFRAG:
+		*vm_flags &= ~VM_NOMEMDEFRAG;
+		*vm_flags |= VM_MEMDEFRAG;
+		/*
+		 * If the vma become good for kmem_defragd to scan,
+		 * register it here without waiting a page fault that
+		 * may not happen any time soon.
+		 */
+		if (kmem_defragd_enter(vma, *vm_flags))
+			return -ENOMEM;
+		break;
+	case MADV_NOMEMDEFRAG:
+		*vm_flags &= ~VM_MEMDEFRAG;
+		*vm_flags |= VM_NOMEMDEFRAG;
+		/*
+		 * Setting VM_NOMEMDEFRAG will prevent kmem_defragd from scanning
+		 * this vma even if we leave the mm registered in kmem_defragd if
+		 * it got registered before VM_NOMEMDEFRAG was set.
+		 */
+		break;
+	}
+
+	return 0;
+}
 
 
 void __init kmem_defragd_destroy(void)
