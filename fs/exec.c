@@ -1003,7 +1003,11 @@ static int exec_mmap(struct mm_struct *mm)
 {
 	struct task_struct *tsk;
 	struct mm_struct *old_mm, *active_mm;
+	int move_mem_defrag = current->mm?
+		test_bit(MMF_VM_MEM_DEFRAG_ALL, &current->mm->flags):0;
 
+	if (move_mem_defrag && mm)
+		set_bit(MMF_VM_MEM_DEFRAG_ALL, &mm->flags);
 	/* Notify parent that we're no longer interested in the old VM */
 	tsk = current;
 	old_mm = current->mm;
