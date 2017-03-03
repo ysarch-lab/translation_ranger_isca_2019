@@ -36,9 +36,10 @@ static struct kmem_cache *mm_slot_cache __read_mostly;
 
 struct defrag_scan_control {
 	struct mm_struct *mm;
-	unsigned long *scan_address;
+	unsigned long scan_address;
 	char __user *out_buf;
 	int buf_len;
+	int used_len;
 	enum mem_defrag_action action;
 };
 
@@ -264,30 +265,47 @@ out:
 	return page;
 }
 
-static void do_vma_stat(struct mm_struct *mm, struct vm_area_struct *vma,
+static int do_vma_stat(struct mm_struct *mm, struct vm_area_struct *vma,
 		char *kernel_buf, int pos, int* remain_buf_len)
 {
 	int used_len;
+	int init_remain_len = *remain_buf_len;
 
 	if (!*remain_buf_len || !kernel_buf)
-		return;
+		return -1;
 
 	used_len = scnprintf(kernel_buf + pos, *remain_buf_len, "%p, %p, 0x%lx, "
 						 "0x%lx, -1\n",
 						 mm, vma, vma->vm_start, vma->vm_end);
 
 	*remain_buf_len -= used_len;
+
+	if (*remain_buf_len == 1) {
+		*remain_buf_len = init_remain_len;
+		kernel_buf[pos] = '\0';
+		return -1;
+	}
+	
+	return 0;
 }
 
-static void do_page_stat(struct mm_struct *mm, struct vm_area_struct *vma,
+/*
+ * write one page stats to kernel_buf.
+ *
+ * If kernel_buf is not big enough, the page information will not be recorded
+ * at all.
+ *
+ *  */
+static int do_page_stat(struct mm_struct *mm, struct vm_area_struct *vma,
 		struct page *page, unsigned long vaddr,
 		char *kernel_buf, int pos, int* remain_buf_len)
 {
 	int used_len;
 	struct anon_vma *anon_vma;
+	int init_remain_len = *remain_buf_len;
 
 	if (!*remain_buf_len || !kernel_buf)
-		return;
+		return -1;
 
 	used_len = scnprintf(kernel_buf + pos, *remain_buf_len, "%p, %p, 0x%lx, 0x%lx, "
 						 "0x%lx, 0x%llx",
@@ -295,20 +313,18 @@ static void do_page_stat(struct mm_struct *mm, struct vm_area_struct *vma,
 						 vaddr, page ? PFN_PHYS(page_to_pfn(page)) : 0);
 
 	*remain_buf_len -= used_len;
+	if (*remain_buf_len == 1)
+		goto out_of_buf;
 	pos += used_len;
-
-	if (!*remain_buf_len)
-		return;
 
 	if (page && PageAnon(page)) {
 		/* check page order  */
 		used_len = scnprintf(kernel_buf + pos, *remain_buf_len, ", %d",
 							 compound_order(page));
 		*remain_buf_len -= used_len;
+		if (*remain_buf_len == 1)
+			goto out_of_buf;
 		pos += used_len;
-
-		if (!*remain_buf_len)
-			return;
 
 		anon_vma = page_anon_vma(page);
 		if (!anon_vma)
@@ -319,10 +335,12 @@ static void do_page_stat(struct mm_struct *mm, struct vm_area_struct *vma,
 			used_len = scnprintf(kernel_buf + pos, *remain_buf_len, ", %p",
 								 anon_vma);
 			*remain_buf_len -= used_len;
+			if (*remain_buf_len == 1) {
+				anon_vma_unlock_read(anon_vma);
+				goto out_of_buf;
+			}
 			pos += used_len;
 
-			if (!*remain_buf_len)
-				return;
 			anon_vma = anon_vma->parent;
 		} while (anon_vma != anon_vma->parent);
 
@@ -332,6 +350,15 @@ end_of_stat:
 	/* end of one page stat  */
 	used_len = scnprintf(kernel_buf + pos, *remain_buf_len, ", -1\n");
 	*remain_buf_len -= used_len;
+	if (*remain_buf_len == 1)
+		goto out_of_buf;
+
+	return 0;
+out_of_buf: /* revert incomplete data  */
+	*remain_buf_len = init_remain_len;
+	kernel_buf[pos] = '\0';
+	return -1;
+
 }
 
 static inline int get_contig_page_size(struct page *page)
@@ -357,11 +384,11 @@ static inline int get_contig_page_size(struct page *page)
  * The function will down_read mmap_sem.
  *
  */
-static unsigned int kmem_defragd_scan_mm(struct defrag_scan_control *sc)
+static int kmem_defragd_scan_mm(struct defrag_scan_control *sc)
 {
 	struct mm_struct *mm = sc->mm;
-	struct vm_area_struct *vma;
-	unsigned long *scan_address = sc->scan_address;
+	struct vm_area_struct *vma = NULL;
+	unsigned long *scan_address = &sc->scan_address;
 	char *stats_buf = NULL;
 	int remain_buf_len = sc->buf_len;
 	int err = 0;
@@ -387,9 +414,11 @@ static unsigned int kmem_defragd_scan_mm(struct defrag_scan_control *sc)
 		if (unlikely(kmem_defragd_test_exit(mm)))
 			break;
 		if (!mem_defrag_vma_check(vma)) {
+			*scan_address = vma->vm_end;
 			if (sc->action == MEM_DEFRAG_FULL_STATS)
-				do_vma_stat(mm, vma, stats_buf, sc->buf_len - remain_buf_len,
-							&remain_buf_len);
+				if (do_vma_stat(mm, vma, stats_buf, sc->buf_len - remain_buf_len,
+							&remain_buf_len))
+					goto breakouterloop;
 skip:
 			continue;
 		}
@@ -413,9 +442,10 @@ skip:
 			page = get_page_from_address(mm, vma, *scan_address);
 
 			if (sc->action == MEM_DEFRAG_FULL_STATS)
-				do_page_stat(mm, vma, page, *scan_address,
+				if (do_page_stat(mm, vma, page, *scan_address,
 							stats_buf, sc->buf_len - remain_buf_len,
-							&remain_buf_len);
+							&remain_buf_len))
+					goto breakouterloop;
 			/* move to next address */
 			if (page)
 				*scan_address += get_contig_page_size(page);
@@ -433,8 +463,11 @@ breakouterloop:
 breakouterloop_mmap_sem:
 
 	if (sc->action == MEM_DEFRAG_FULL_STATS &&
-		sc->buf_len)
-		err = copy_to_user(sc->out_buf, stats_buf, sc->buf_len);
+		sc->buf_len) {
+		err = copy_to_user(sc->out_buf, stats_buf,
+				sc->buf_len - remain_buf_len);
+		sc->used_len = sc->buf_len - remain_buf_len;
+	}
 
 	if (stats_buf)
 		vfree(stats_buf);
@@ -449,9 +482,8 @@ SYSCALL_DEFINE4(scan_process_memory, pid_t, pid, char __user *, out_buf,
 	const struct cred *cred = current_cred(), *tcred;
 	struct task_struct *task;
 	struct mm_struct *mm;
-	int err;
-	struct defrag_scan_control defrag_scan_control = {0};
-	unsigned long scan_address = 0;
+	int err = 0;
+	static struct defrag_scan_control defrag_scan_control = {0};
 	struct mm_slot *iter;
 
 	/* Find the mm_struct */
@@ -491,18 +523,28 @@ SYSCALL_DEFINE4(scan_process_memory, pid_t, pid, char __user *, out_buf,
 
 	switch (action) {
 		case MEM_DEFRAG_SCAN:
-			defrag_scan_control.mm = mm;
-			defrag_scan_control.scan_address = &scan_address;
+			/* reset scan control  */
+			if (!defrag_scan_control.mm ||
+				defrag_scan_control.mm != mm) {
+				defrag_scan_control.mm = mm;
+				defrag_scan_control.scan_address = 0;
+			}
 			defrag_scan_control.out_buf = out_buf;
 			defrag_scan_control.buf_len = buf_len;
 			defrag_scan_control.action = MEM_DEFRAG_FULL_STATS;
+			defrag_scan_control.used_len = 0;
 
 			if (unlikely(!access_ok(VERIFY_WRITE, out_buf, buf_len))) {
 				err = -EFAULT;
 				break;
 			}
 
-			kmem_defragd_scan_mm(&defrag_scan_control);
+			/* clear mm once it is fully scanned  */
+			if (!kmem_defragd_scan_mm(&defrag_scan_control) && 
+				!defrag_scan_control.used_len)
+				defrag_scan_control.mm = NULL;
+
+			err = defrag_scan_control.used_len;
 			break;
 		case MEM_DEFRAG_MARK_SCAN_ALL:
 			set_bit(MMF_VM_MEM_DEFRAG_ALL, &mm->flags);
@@ -550,10 +592,12 @@ static unsigned int kmem_defragd_scan_mm_slot(void)
 	spin_unlock(&kmem_defragd_mm_lock);
 
 	defrag_scan_control.mm = mm_slot->mm;
-	defrag_scan_control.scan_address = &kmem_defragd_scan.address;
+	defrag_scan_control.scan_address = kmem_defragd_scan.address;
 	defrag_scan_control.action = MEM_DEFRAG_DO_DEFRAG;
 
 	scan_status = kmem_defragd_scan_mm(&defrag_scan_control);
+
+	kmem_defragd_scan.address = defrag_scan_control.scan_address;
 
 	spin_lock(&kmem_defragd_mm_lock);
 	VM_BUG_ON(kmem_defragd_scan.mm_slot != mm_slot);
