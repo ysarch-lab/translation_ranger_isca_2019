@@ -39,6 +39,7 @@ struct defrag_scan_control {
 	unsigned long *scan_address;
 	char __user *out_buf;
 	int buf_len;
+	enum mem_defrag_action action;
 };
 
 /**
@@ -366,7 +367,8 @@ static unsigned int kmem_defragd_scan_mm(struct defrag_scan_control *sc)
 	int err = 0;
 
 
-	if (sc->buf_len) {
+	if (sc->action == MEM_DEFRAG_FULL_STATS &&
+		sc->buf_len) {
 		stats_buf = vzalloc(sc->buf_len);
 		if (!stats_buf)
 			goto breakouterloop_mmap_sem;
@@ -385,8 +387,9 @@ static unsigned int kmem_defragd_scan_mm(struct defrag_scan_control *sc)
 		if (unlikely(kmem_defragd_test_exit(mm)))
 			break;
 		if (!mem_defrag_vma_check(vma)) {
-			do_vma_stat(mm, vma, stats_buf, sc->buf_len - remain_buf_len,
-						&remain_buf_len);
+			if (sc->action == MEM_DEFRAG_FULL_STATS)
+				do_vma_stat(mm, vma, stats_buf, sc->buf_len - remain_buf_len,
+							&remain_buf_len);
 skip:
 			continue;
 		}
@@ -409,9 +412,10 @@ skip:
 
 			page = get_page_from_address(mm, vma, *scan_address);
 
-			do_page_stat(mm, vma, page, *scan_address,
-						stats_buf, sc->buf_len - remain_buf_len,
-						&remain_buf_len);
+			if (sc->action == MEM_DEFRAG_FULL_STATS)
+				do_page_stat(mm, vma, page, *scan_address,
+							stats_buf, sc->buf_len - remain_buf_len,
+							&remain_buf_len);
 			/* move to next address */
 			if (page)
 				*scan_address += get_contig_page_size(page);
@@ -428,7 +432,8 @@ breakouterloop:
 	up_read(&mm->mmap_sem); /* exit_mmap will destroy ptes after this */
 breakouterloop_mmap_sem:
 
-	if (sc->buf_len)
+	if (sc->action == MEM_DEFRAG_FULL_STATS &&
+		sc->buf_len)
 		err = copy_to_user(sc->out_buf, stats_buf, sc->buf_len);
 
 	if (stats_buf)
@@ -490,6 +495,12 @@ SYSCALL_DEFINE4(scan_process_memory, pid_t, pid, char __user *, out_buf,
 			defrag_scan_control.scan_address = &scan_address;
 			defrag_scan_control.out_buf = out_buf;
 			defrag_scan_control.buf_len = buf_len;
+			defrag_scan_control.action = MEM_DEFRAG_FULL_STATS;
+
+			if (unlikely(!access_ok(VERIFY_WRITE, out_buf, buf_len))) {
+				err = -EFAULT;
+				break;
+			}
 
 			kmem_defragd_scan_mm(&defrag_scan_control);
 			break;
@@ -540,6 +551,7 @@ static unsigned int kmem_defragd_scan_mm_slot(void)
 
 	defrag_scan_control.mm = mm_slot->mm;
 	defrag_scan_control.scan_address = &kmem_defragd_scan.address;
+	defrag_scan_control.action = MEM_DEFRAG_DO_DEFRAG;
 
 	scan_status = kmem_defragd_scan_mm(&defrag_scan_control);
 

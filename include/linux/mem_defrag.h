@@ -7,6 +7,11 @@
 #define MEM_DEFRAG_MARK_SCAN_ALL	1
 #define MEM_DEFRAG_CLEAR_SCAN_ALL	2
 
+enum mem_defrag_action {
+	MEM_DEFRAG_FULL_STATS = 0,
+	MEM_DEFRAG_DO_DEFRAG,
+};
+
 extern int kmem_defragd_always;
 
 extern int __kmem_defragd_enter(struct mm_struct *mm);
