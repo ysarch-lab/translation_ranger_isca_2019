@@ -1288,6 +1288,25 @@ const char * const vmstat_text[] = {
 	"swap_ra",
 	"swap_ra_hit",
 #endif
+	"memdefrag_defrag",
+	"memdefrag_scan",
+	"memdefrag_dest_free_pages",
+	"memdefrag_dest_anon_pages",
+	"memdefrag_dest_file_pages",
+	"memdefrag_dest_free_pages_failed",
+	"memdefrag_dest_free_pages_overflow_failed",
+	"memdefrag_dest_anon_pages_failed",
+	"memdefrag_dest_file_pages_failed",
+	"memdefrag_src_anon_pages_failed",
+	"memdefrag_src_compound_pages_failed",
+	"memdefrag_dst_split_hugepage",
+#ifdef CONFIG_COMPACTION
+	"compact_migrate_pages",
+#endif
+#ifdef CONFIG_TRANSPARENT_HUGEPAGE
+	"thp_collapse_migrate_pages"
+#endif
+
 #endif /* CONFIG_VM_EVENTS_COUNTERS */
 };
 #endif /* CONFIG_PROC_FS || CONFIG_SYSFS || CONFIG_NUMA */

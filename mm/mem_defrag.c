@@ -20,12 +20,46 @@
 #include <linux/security.h>
 #include <linux/vmalloc.h>
 #include <linux/mman.h>
+#include <linux/vmstat.h>
+#include <linux/migrate.h>
+#include <linux/page-isolation.h>
+#include <linux/sort.h>
 
 #include <asm/tlb.h>
 #include <asm/pgalloc.h>
 #include "internal.h"
 
 
+struct contig_stats {
+	int err;
+	unsigned long contig_pages;
+	unsigned long first_vaddr_in_chunk;
+	unsigned long first_paddr_in_chunk;
+};
+
+struct defrag_result_stats {
+	unsigned long aligned;
+	unsigned long migrated;
+	unsigned long src_compound_failed;
+	unsigned long src_not_present;
+	unsigned long dst_out_of_bound_failed;
+	unsigned long dst_compound_failed;
+	unsigned long dst_free_failed;
+	unsigned long dst_anon_failed;
+	unsigned long dst_file_failed;
+	unsigned long dst_misc_failed;
+	unsigned long not_defrag_vpn;
+};
+
+enum {
+	VMA_THRESHOLD_TYPE_TIME = 0,
+	VMA_THRESHOLD_TYPE_SIZE,
+};
+
+int num_breakout_chunks = 0;
+int vma_scan_percentile = 100;
+int vma_scan_threshold_type = VMA_THRESHOLD_TYPE_TIME;
+int vma_no_repeat_defrag = 0;
 int kmem_defragd_always;
 static DEFINE_SPINLOCK(kmem_defragd_mm_lock);
 
@@ -41,6 +75,8 @@ struct defrag_scan_control {
 	int buf_len;
 	int used_len;
 	enum mem_defrag_action action;
+	bool scan_in_vma;
+	unsigned long vma_scan_threshold;
 };
 
 /**
@@ -195,9 +231,9 @@ static void collect_mm_slot(struct mm_slot *mm_slot)
 
 static bool mem_defrag_vma_check(struct vm_area_struct *vma)
 {
-	if (!test_bit(MMF_VM_MEM_DEFRAG_ALL, &vma->vm_mm->flags) &&
-		((!(vma->vm_flags & VM_MEMDEFRAG) && !kmem_defragd_always) ||
-			(vma->vm_flags & VM_NOMEMDEFRAG)))
+	if ((!test_bit(MMF_VM_MEM_DEFRAG_ALL, &vma->vm_mm->flags) &&
+		!(vma->vm_flags & VM_MEMDEFRAG) && !kmem_defragd_always) ||
+		(vma->vm_flags & VM_NOMEMDEFRAG))
 			return false;
 	if (shmem_file(vma->vm_file)) {
 		if (!IS_ENABLED(CONFIG_TRANSPARENT_HUGE_PAGECACHE))
@@ -205,64 +241,13 @@ static bool mem_defrag_vma_check(struct vm_area_struct *vma)
 		return IS_ALIGNED((vma->vm_start >> PAGE_SHIFT) - vma->vm_pgoff,
 				HPAGE_PMD_NR);
 	}
+	if (is_vm_hugetlb_page(vma))
+		return true;
 	if (!vma->anon_vma || vma->vm_ops)
 		return false;
 	if (is_vma_temporary_stack(vma))
 		return false;
 	return true;
-}
-
-/* The caller should down_read mmap_sem  */
-static struct page* get_page_from_address(struct mm_struct *mm,
-						struct vm_area_struct *vma,
-						unsigned long address)
-{
-	struct page *page = NULL;
-	pgd_t *pgd;
-	p4d_t *p4d;
-	pud_t *pud;
-	pmd_t *pmdp;
-	pte_t *ptep, pteval;
-	spinlock_t *ptl;
-
-	pgd = pgd_offset(mm, address);
-	if (!pgd_present(*pgd))
-		goto out;
-	p4d = p4d_offset(pgd, address);
-	if (!p4d_present(*p4d))
-		goto out;
-	pud = pud_offset(p4d, address);
-	if (!pud_present(*pud))
-		goto out;
-	pmdp = pmd_offset(pud, address);
-	if (!pmd_present(*pmdp))
-		goto out;
-
-	if (pmd_trans_huge(*pmdp)) {
-		ptl = pmd_lock(mm, pmdp);
-
-		if (!pmd_present(*pmdp))
-			goto pmd_out_unlock;
-
-		if (pmd_trans_huge(*pmdp))
-			page = pmd_page(*pmdp);
-
-pmd_out_unlock:
-		spin_unlock(ptl);
-	} else {
-		if (pmd_trans_unstable(pmdp))
-			goto out;
-
-		ptep = pte_offset_map_lock(mm, pmdp, address, &ptl);
-		pteval = *ptep;
-
-		page = vm_normal_page(vma, address, pteval);
-
-		pte_unmap_unlock(ptep, ptl);
-	}
-
-out:
-	return page;
 }
 
 static int do_vma_stat(struct mm_struct *mm, struct vm_area_struct *vma,
@@ -274,9 +259,9 @@ static int do_vma_stat(struct mm_struct *mm, struct vm_area_struct *vma,
 	if (!*remain_buf_len || !kernel_buf)
 		return -1;
 
-	used_len = scnprintf(kernel_buf + pos, *remain_buf_len, "%p, %p, 0x%lx, "
+	used_len = scnprintf(kernel_buf + pos, *remain_buf_len, "%p, 0x%lx, 0x%lx, "
 						 "0x%lx, -1\n",
-						 mm, vma, vma->vm_start, vma->vm_end);
+						 mm, (unsigned long)vma+vma->vma_create_jiffies, vma->vm_start, vma->vm_end);
 
 	*remain_buf_len -= used_len;
 
@@ -285,8 +270,26 @@ static int do_vma_stat(struct mm_struct *mm, struct vm_area_struct *vma,
 		kernel_buf[pos] = '\0';
 		return -1;
 	}
-	
+
 	return 0;
+}
+
+static inline int get_contig_page_size(struct page *page)
+{
+	int page_size = PAGE_SIZE;
+
+	if (PageCompound(page)) {
+		struct page *head_page = compound_head(page);
+		int compound_size = PAGE_SIZE<<compound_order(head_page);
+
+		if (head_page != page) {
+			VM_BUG_ON_PAGE(!PageTail(page), page);
+			page_size = compound_size - (page - head_page) * PAGE_SIZE;
+		} else
+			page_size = compound_size;
+	}
+
+	return page_size;
 }
 
 /*
@@ -298,14 +301,131 @@ static int do_vma_stat(struct mm_struct *mm, struct vm_area_struct *vma,
  *  */
 static int do_page_stat(struct mm_struct *mm, struct vm_area_struct *vma,
 		struct page *page, unsigned long vaddr,
-		char *kernel_buf, int pos, int* remain_buf_len)
+		char *kernel_buf, int pos, int* remain_buf_len,
+		enum mem_defrag_action action,
+		struct contig_stats *contig_stats,
+		bool scan_in_vma)
 {
 	int used_len;
 	struct anon_vma *anon_vma;
 	int init_remain_len = *remain_buf_len;
+	int end_note = -1;
+	unsigned long num_pages = page?(get_contig_page_size(page)/PAGE_SIZE):1;
 
 	if (!*remain_buf_len || !kernel_buf)
 		return -1;
+
+	if (action == MEM_DEFRAG_CONTIG_STATS) {
+		long long contig_pages;
+		unsigned long paddr = page?PFN_PHYS(page_to_pfn(page)):0;
+		bool last_entry = false;
+
+		if (!contig_stats->first_vaddr_in_chunk) {
+			contig_stats->first_vaddr_in_chunk = vaddr;
+			contig_stats->first_paddr_in_chunk = paddr;
+			contig_stats->contig_pages = 0;
+		}
+
+		/* scan_in_vma is set to true if buffer runs out while scanning a
+		 * vma. A corner case happens, when buffer runs out, then vma changes,
+		 * scan_address is reset to vm_start. Then, vma info is printed twice.
+		 */
+		if (vaddr == vma->vm_start && !scan_in_vma) {
+			used_len = scnprintf(kernel_buf + pos, *remain_buf_len, "%p, 0x%lx, 0x%lx, "
+								 "0x%lx, ",
+								 mm, (unsigned long)vma+vma->vma_create_jiffies, vma->vm_start, vma->vm_end);
+
+			*remain_buf_len -= used_len;
+
+			if (*remain_buf_len == 1) {
+				contig_stats->err = 1;
+				goto out_of_buf;
+			}
+			pos += used_len;
+		}
+
+		if (page) {
+			if (contig_stats->first_paddr_in_chunk) {
+				if (((long long)vaddr - contig_stats->first_vaddr_in_chunk) ==
+					((long long)paddr - contig_stats->first_paddr_in_chunk))
+					contig_stats->contig_pages += num_pages;
+				else {
+					/* output present contig chunk */
+					contig_pages = contig_stats->contig_pages;
+					goto output_contig_info;
+				}
+			} else { /* the previous chunk is not present pages */
+				/* output non-present contig chunk */
+				contig_pages = -(long long)contig_stats->contig_pages;
+				goto output_contig_info;
+			}
+		} else {
+			/* the previous chunk is not present pages */
+			if (!contig_stats->first_paddr_in_chunk) {
+				VM_BUG_ON(contig_stats->first_vaddr_in_chunk +
+						  contig_stats->contig_pages * PAGE_SIZE !=
+						  vaddr);
+				++contig_stats->contig_pages;
+			} else {
+				/* output present contig chunk */
+				contig_pages = contig_stats->contig_pages;
+
+				goto output_contig_info;
+			}
+		}
+
+check_last_entry:
+		/* if vaddr is the last page, we need to dump stats as well  */
+		if ((vaddr + num_pages * PAGE_SIZE) < vma->vm_end)
+			return 0;
+		else {
+			if (contig_stats->first_paddr_in_chunk)
+				contig_pages = contig_stats->contig_pages;
+			else
+				contig_pages = -(long long)contig_stats->contig_pages;
+			last_entry = true;
+		}
+output_contig_info:
+		if (last_entry)
+			used_len = scnprintf(kernel_buf + pos, *remain_buf_len, "%lld, -1\n",
+								 contig_pages);
+		else
+			used_len = scnprintf(kernel_buf + pos, *remain_buf_len, "%lld, ",
+								 contig_pages);
+
+		*remain_buf_len -= used_len;
+		if (*remain_buf_len == 1) {
+			contig_stats->err = 1;
+			goto out_of_buf;
+		} else {
+			pos += used_len;
+			if (last_entry) {
+				/* clear contig_stats  */
+				contig_stats->first_vaddr_in_chunk = 0;
+				contig_stats->first_paddr_in_chunk = 0;
+				contig_stats->contig_pages = 0;
+				return 0;
+			} else {
+				/* set new contig_stats  */
+				contig_stats->first_vaddr_in_chunk = vaddr;
+				contig_stats->first_paddr_in_chunk = paddr;
+				contig_stats->contig_pages = num_pages;
+				goto check_last_entry;
+			}
+		}
+		return 0;
+	}
+
+	if (!list_empty(&vma->anchor_page_list)) {
+		struct anchor_page_info *iter;
+
+		list_for_each_entry(iter, &vma->anchor_page_list, list)
+			if (vaddr >= iter->start && vaddr < iter->end &&
+				page == iter->anchor_page) {
+				end_note = -2;
+				break;
+			}
+	}
 
 	used_len = scnprintf(kernel_buf + pos, *remain_buf_len, "%p, %p, 0x%lx, 0x%lx, "
 						 "0x%lx, 0x%llx",
@@ -348,7 +468,7 @@ static int do_page_stat(struct mm_struct *mm, struct vm_area_struct *vma,
 	}
 end_of_stat:
 	/* end of one page stat  */
-	used_len = scnprintf(kernel_buf + pos, *remain_buf_len, ", -1\n");
+	used_len = scnprintf(kernel_buf + pos, *remain_buf_len, ", %d\n", end_note);
 	*remain_buf_len -= used_len;
 	if (*remain_buf_len == 1)
 		goto out_of_buf;
@@ -361,22 +481,791 @@ out_of_buf: /* revert incomplete data  */
 
 }
 
-static inline int get_contig_page_size(struct page *page)
+static inline unsigned long get_page_offset(unsigned long addr1,
+		unsigned long addr2, unsigned long alignment)
 {
-	int page_size = PAGE_SIZE;
+	unsigned long mask = alignment - 1;
+	return (alignment + (addr1 & mask) - (addr2 & mask)) & mask;
+}
 
-	if (PageCompound(page)) {
-		struct page *head_page = compound_head(page);
-		int compound_size = PAGE_SIZE<<compound_order(head_page);
+static inline bool migrate_async_suitable(int migratetype)
+{
+	return is_migrate_cma(migratetype) || migratetype == MIGRATE_MOVABLE;
+}
 
-		if (head_page != page) {
-			VM_BUG_ON_PAGE(!PageTail(page), page);
-			page_size = compound_size - (page - head_page) * PAGE_SIZE;
-		} else
-			page_size = compound_size;
+static int isolate_free_page_no_wmark(struct page *page, unsigned int order)
+{
+	struct zone *zone;
+	int mt;
+
+	BUG_ON(!PageBuddy(page));
+
+	zone = page_zone(page);
+	mt = get_pageblock_migratetype(page);
+
+
+	/* Remove page from free list */
+	list_del(&page->lru);
+	zone->free_area[order].nr_free--;
+	__ClearPageBuddy(page);
+	set_page_private(page, 0);
+
+	/*
+	 * Set the pageblock if the isolated page is at least half of a
+	 * pageblock
+	 */
+	if (order >= pageblock_order - 1) {
+		struct page *endpage = page + (1 << order) - 1;
+		for (; page < endpage; page += pageblock_nr_pages) {
+			int mt = get_pageblock_migratetype(page);
+			if (!is_migrate_isolate(mt) && !is_migrate_cma(mt)
+				&& mt != MIGRATE_HIGHATOMIC)
+				set_pageblock_migratetype(page,
+							  MIGRATE_MOVABLE);
+		}
 	}
 
-	return page_size;
+	return 1UL << order;
+}
+
+static void map_free_pages(struct list_head *list)
+{
+	unsigned int i, order, nr_pages;
+	struct page *page, *next;
+	LIST_HEAD(tmp_list);
+
+	list_for_each_entry_safe(page, next, list, lru) {
+		list_del(&page->lru);
+
+		order = page_private(page);
+		nr_pages = 1 << order;
+
+		post_alloc_hook(page, order, __GFP_MOVABLE);
+		if (order)
+			split_page(page, order);
+
+		for (i = 0; i < nr_pages; i++) {
+			list_add_tail(&page->lru, &tmp_list);
+			page++;
+		}
+	}
+
+	list_splice(&tmp_list, list);
+}
+
+struct exchange_alloc_info {
+	struct list_head list;
+	struct page *src_page;
+	struct page *dst_page;
+};
+
+struct exchange_alloc_head {
+	struct list_head exchange_list;
+	struct list_head freelist;
+	struct list_head migratepage_list;
+	unsigned long num_freepages;
+};
+
+static int create_exchange_alloc_info(struct vm_area_struct *vma,
+		unsigned long scan_address, struct page *first_in_use_page,
+		int total_free_pages,
+		struct list_head *freelist,
+		struct list_head *exchange_list,
+		struct list_head *migratepage_list)
+{
+	struct page *in_use_page;
+	struct page *freepage;
+	struct exchange_alloc_info *one_pair;
+	int err;
+	int pagevec_flushed = 0;
+
+	down_read(&vma->vm_mm->mmap_sem);
+	in_use_page = follow_page(vma, scan_address,
+							FOLL_GET|FOLL_MIGRATION | FOLL_REMOTE);
+	up_read(&vma->vm_mm->mmap_sem);
+
+	freepage = list_first_entry_or_null(freelist, struct page, lru);
+
+	if (first_in_use_page != in_use_page ||
+		!freepage ||
+		PageCompound(in_use_page) != PageCompound(freepage) ||
+		compound_order(in_use_page) != compound_order(freepage)) {
+		if (in_use_page)
+			put_page(in_use_page);
+		return -EBUSY;
+	}
+	one_pair = kmalloc(sizeof(struct exchange_alloc_info),
+		GFP_KERNEL | __GFP_ZERO);
+
+	if (!one_pair) {
+		put_page(in_use_page);
+		return -ENOMEM;
+	}
+
+retry_isolate:
+	/* isolate in_use_page */
+	err = isolate_lru_page(in_use_page);
+	if (err) {
+		if (!pagevec_flushed) {
+			migrate_prep();
+			pagevec_flushed = 1;
+			goto retry_isolate;
+		}
+		put_page(in_use_page);
+		in_use_page = NULL;
+	}
+
+	if (in_use_page) {
+		put_page(in_use_page);
+		mod_node_page_state(page_pgdat(in_use_page),
+				NR_ISOLATED_ANON + page_is_file_cache(in_use_page),
+				hpage_nr_pages(in_use_page));
+		list_add_tail(&in_use_page->lru, migratepage_list);
+	}
+	/* fill info  */
+	one_pair->src_page = in_use_page;
+	one_pair->dst_page = freepage;
+	INIT_LIST_HEAD(&one_pair->list);
+
+	list_add_tail(&one_pair->list, exchange_list);
+
+	return 0;
+}
+
+static void free_alloc_info(struct list_head *alloc_info_list)
+{
+	struct exchange_alloc_info *item, *item2;
+
+	list_for_each_entry_safe(item, item2, alloc_info_list, list) {
+		list_del(&item->list);
+		kfree(item);
+	}
+}
+
+/*
+ * migrate callback: give a specific free page when it is called to guarantee
+ * contiguity after migration.
+ */
+static struct page *exchange_alloc(struct page *migratepage,
+				unsigned long data,
+				int **result)
+{
+	struct exchange_alloc_head *head = (struct exchange_alloc_head *)data;
+	struct page *freepage = NULL;
+	struct exchange_alloc_info *info;
+
+	list_for_each_entry(info, &head->exchange_list, list) {
+		if (migratepage == info->src_page) {
+			freepage = info->dst_page;
+			/* remove it from freelist */
+			list_del(&freepage->lru);
+			if (PageTransHuge(freepage))
+				head->num_freepages -= HPAGE_PMD_NR;
+			else
+				head->num_freepages--;
+			break;
+		}
+	}
+
+	return freepage;
+}
+
+static void exchange_free(struct page *freepage, unsigned long data)
+{
+	struct exchange_alloc_head *head = (struct exchange_alloc_head *)data;
+
+	list_add_tail(&freepage->lru, &head->freelist);
+	if (PageTransHuge(freepage))
+		head->num_freepages += HPAGE_PMD_NR;
+	else
+		head->num_freepages++;
+}
+
+int defrag_address_range(struct mm_struct *mm, struct vm_area_struct *vma,
+		unsigned long start_addr, unsigned long end_addr,
+		struct page *anchor_page, unsigned long page_vaddr,
+		struct defrag_result_stats *defrag_stats)
+{
+	/*unsigned long va_pa_page_offset = (unsigned long)-1;*/
+	unsigned long scan_address;
+	unsigned long page_size = PAGE_SIZE;
+	int failed = 0;
+	int not_present = 0;
+	bool src_thp = false;
+
+	for (scan_address = start_addr; scan_address < end_addr;
+		 scan_address += page_size) {
+		struct page *scan_page;
+		unsigned long scan_phys_addr;
+		long long page_dist;
+
+		cond_resched();
+
+		down_read(&vma->vm_mm->mmap_sem);
+		scan_page = follow_page(vma, scan_address, FOLL_MIGRATION | FOLL_REMOTE);
+		up_read(&vma->vm_mm->mmap_sem);
+		scan_phys_addr = PFN_PHYS(scan_page ? page_to_pfn(scan_page) : 0);
+
+		page_size = PAGE_SIZE;
+
+		if (!scan_phys_addr) {
+			not_present++;
+			failed += 1;
+			defrag_stats->src_not_present += 1;
+			continue;
+		}
+
+		page_size = get_contig_page_size(scan_page);
+
+		/* PTE-mapped THP not allowed  */
+		if ((scan_page == compound_head(scan_page)) &&
+			PageTransHuge(scan_page) && !PageHuge(scan_page))
+			src_thp = true;
+
+		/* Allow THPs  */
+		if (PageCompound(scan_page) && !src_thp) {
+			count_vm_events(MEM_DEFRAG_SRC_COMP_PAGES_FAILED, page_size/PAGE_SIZE);
+			failed += (page_size/PAGE_SIZE);
+			defrag_stats->src_compound_failed += (page_size/PAGE_SIZE);
+
+			defrag_stats->not_defrag_vpn = scan_address + page_size;
+			goto quit_defrag;
+			continue;
+		}
+
+		VM_BUG_ON(!anchor_page);
+
+		page_dist = (scan_address - page_vaddr) / PAGE_SIZE;
+
+		/* already in the contiguous pos  */
+		if (page_dist == (long long)(scan_page - anchor_page)) {
+			defrag_stats->aligned += (page_size/PAGE_SIZE);
+			continue;
+		} else { /* migrate pages according to the anchor pages in the vma.  */
+			struct page *dest_page = anchor_page + page_dist;
+			int page_drained = 0;
+			bool dst_thp = false;
+			int scan_page_order = src_thp?compound_order(scan_page):0;
+
+			if (zone_end_pfn(page_zone(anchor_page)) <= (page_to_pfn(anchor_page) + page_dist) ||
+				page_zone(anchor_page)->zone_start_pfn > (page_to_pfn(anchor_page) + page_dist)) {
+				failed += 1;
+				defrag_stats->dst_out_of_bound_failed += 1;
+
+				defrag_stats->not_defrag_vpn = scan_address + page_size;
+				goto quit_defrag;
+				continue;
+			}
+
+retry_defrag:
+			/* migrate */
+			if (PageBuddy(dest_page)) {
+				struct zone *zone = page_zone(dest_page);
+				spinlock_t *zone_lock = &zone->lock;
+				unsigned long zone_lock_flags;
+				unsigned long free_page_order = 0;
+				int err = 0;
+				struct exchange_alloc_head exchange_alloc_head = {0};
+				int migratetype = get_pageblock_migratetype(dest_page);
+
+				INIT_LIST_HEAD(&exchange_alloc_head.exchange_list);
+				INIT_LIST_HEAD(&exchange_alloc_head.freelist);
+				INIT_LIST_HEAD(&exchange_alloc_head.migratepage_list);
+
+				count_vm_events(MEM_DEFRAG_DST_FREE_PAGES, 1<<scan_page_order);
+
+				if (!migrate_async_suitable(migratetype)) {
+					failed += 1;
+					defrag_stats->dst_free_failed += 1;
+
+					defrag_stats->not_defrag_vpn = scan_address + page_size;
+					goto quit_defrag;
+					continue;
+				}
+
+				/* lock page_zone(dest_page)->lock  */
+				spin_lock_irqsave(zone_lock, zone_lock_flags);
+
+				if (!PageBuddy(dest_page)) {
+					err = -EINVAL;
+					goto freepage_isolate_fail;
+				}
+
+				free_page_order = page_order(dest_page);
+
+				/* fail early if not enough free pages */
+				if (free_page_order < scan_page_order) {
+					err = -ENOMEM;
+					goto freepage_isolate_fail;
+				}
+
+				pr_debug("defrag: vma: %p, [0x%lx, 0x%lx): vaddr: 0x%lx to 0x%lx, origin page: 0x%lx, dest free page: 0x%lx, order: %lu\n",
+					vma,
+					start_addr,
+					end_addr,
+					scan_address,
+					scan_address + page_size,
+					page_to_pfn(scan_page),
+					page_to_pfn(dest_page), free_page_order);
+
+				/* __isolate_free_page()  */
+				err = isolate_free_page_no_wmark(dest_page, free_page_order);
+				if (!err)
+					goto freepage_isolate_fail;
+
+				expand(zone, dest_page, scan_page_order, free_page_order,
+					&(zone->free_area[free_page_order]),
+					migratetype);
+
+				if (!is_migrate_isolate(migratetype))
+					__mod_zone_freepage_state(zone, -(1UL << scan_page_order), migratetype);
+
+				prep_new_page(dest_page, scan_page_order,
+					__GFP_MOVABLE|(scan_page_order?__GFP_COMP:0), 0);
+
+				if (scan_page_order) {
+					VM_BUG_ON(!src_thp);
+					VM_BUG_ON(scan_page_order != HPAGE_PMD_ORDER);
+					prep_transhuge_page(dest_page);
+				}
+
+				list_add(&dest_page->lru, &exchange_alloc_head.freelist);
+
+freepage_isolate_fail:
+				spin_unlock_irqrestore(zone_lock, zone_lock_flags);
+
+				if (err < 0) {
+					failed += (page_size/PAGE_SIZE);
+					defrag_stats->dst_free_failed += (page_size/PAGE_SIZE);
+
+					defrag_stats->not_defrag_vpn = scan_address + page_size;
+					goto quit_defrag;
+					continue;
+				}
+
+				/* gather in-use pages
+				 * create a exchange_alloc_info structure, a list of
+				 * tuples, each like:
+				 * (in_use_page, free_page)
+				 *
+				 * TODO: Maybe early fail if in_use_page cannot be migrated,
+				 * like pinned.
+				 *
+				 * so in exchange_alloc, the code needs to traverse the list
+				 * and find the tuple from in_use_page. Then return the
+				 * corresponding free page.
+				 *
+				 * This can guarantee the contiguity after migration.
+				 */
+
+				err = create_exchange_alloc_info(vma, scan_address, scan_page,
+							1<<free_page_order,
+							&exchange_alloc_head.freelist,
+							&exchange_alloc_head.exchange_list,
+							&exchange_alloc_head.migratepage_list);
+
+				if (err) {
+					pr_debug("create_exchange_alloc_info error: %d\n", err);
+				}
+				exchange_alloc_head.num_freepages = 1<<scan_page_order;
+
+				/* migrate pags  */
+				err = migrate_pages(&exchange_alloc_head.migratepage_list,
+					exchange_alloc, exchange_free,
+					(unsigned long)&exchange_alloc_head,
+					MIGRATE_SYNC, MR_COMPACTION);
+
+				/* putback not migrated in_use_pagelist */
+				putback_movable_pages(&exchange_alloc_head.migratepage_list);
+
+				/* release free pages in freelist */
+				release_freepages(&exchange_alloc_head.freelist);
+
+				/* free allocated exchange info  */
+				free_alloc_info(&exchange_alloc_head.exchange_list);
+
+				count_vm_events(MEM_DEFRAG_DST_FREE_PAGES_FAILED,
+						exchange_alloc_head.num_freepages);
+
+				if (exchange_alloc_head.num_freepages) {
+					pr_debug("exchange with free pages: total free pages: %lu, "
+							 "remaining after exchange: %lu\n",
+						1UL<<free_page_order, exchange_alloc_head.num_freepages);
+
+					failed += exchange_alloc_head.num_freepages;
+					defrag_stats->dst_free_failed += exchange_alloc_head.num_freepages;
+				}
+				defrag_stats->migrated += ((1UL<<scan_page_order) - exchange_alloc_head.num_freepages);
+
+			} else { /* exchange  */
+				int err = -EBUSY;
+
+				/* PTE-mapped THP not allowed  */
+				if ((dest_page == compound_head(dest_page)) &&
+					PageTransHuge(dest_page) && !PageHuge(dest_page))
+					dst_thp = true;
+
+				if (PageCompound(dest_page) && !dst_thp) {
+					failed += get_contig_page_size(dest_page);
+					defrag_stats->dst_compound_failed += 1;
+
+			defrag_stats->not_defrag_vpn = scan_address + page_size;
+			goto quit_defrag;
+					continue;
+				}
+
+				if (src_thp != dst_thp) {
+					failed += get_contig_page_size(scan_page);
+					defrag_stats->src_compound_failed += 1;
+
+			defrag_stats->not_defrag_vpn = scan_address + page_size;
+			goto quit_defrag;
+					continue;
+				}
+
+				pr_debug("defrag: vma: %p, [0x%lx, 0x%lx]: vaddr: 0x%lx, origin page: 0x%lx, page in use: 0x%lx,"
+					"count: %d, mapcount: %d, mapping: %p, index: %#lx, flags: %#lx(%pGp), %s, order: %d"
+					"\n",
+					vma,
+					start_addr,
+					end_addr,
+					scan_address,
+					page_to_pfn(scan_page),
+					page_to_pfn(dest_page),
+					page_ref_count(dest_page),
+					PageSlab(dest_page)?0:page_mapcount(dest_page),
+					dest_page->mapping, page_to_pgoff(dest_page),
+					dest_page->flags, &dest_page->flags,
+					PageCompound(dest_page)?"compound_page":"single_page",
+					compound_order(dest_page)
+					);
+
+				/* free page on pcplist */
+				if (page_count(dest_page) == 0){
+					/* not managed pages  */
+					if (!dest_page->flags) {
+						failed += 1;
+						defrag_stats->dst_misc_failed += 1;
+
+			defrag_stats->not_defrag_vpn = scan_address + page_size;
+			goto quit_defrag;
+						continue;
+					}
+					/* spill order-0 pages to buddy allocator from pcplist */
+					if (!page_drained) {
+						drain_all_pages(NULL);
+						page_drained = 1;
+						goto retry_defrag;
+					}
+				}
+
+				if (PageAnon(dest_page)) {
+					count_vm_events(MEM_DEFRAG_DST_ANON_PAGES, 1<<scan_page_order);
+
+					if (src_thp && dst_thp)
+						pr_debug("anonymous THP page exchange\n");
+
+					err = exchange_two_pages(scan_page, dest_page);
+					pr_debug("anonymous page exchange\n");
+					if (err) {
+						count_vm_events(MEM_DEFRAG_DST_ANON_PAGES_FAILED, 1<<scan_page_order);
+						failed += 1<<scan_page_order;
+						defrag_stats->dst_anon_failed += 1<<scan_page_order;
+					}
+				} else if (page_mapping(dest_page)) {
+					count_vm_events(MEM_DEFRAG_DST_FILE_PAGES, 1<<scan_page_order);
+
+					err = exchange_two_pages(scan_page, dest_page);
+					pr_debug("file-backed page exchange\n");
+					if (err) {
+						count_vm_events(MEM_DEFRAG_DST_FILE_PAGES_FAILED, 1<<scan_page_order);
+						failed += 1<<scan_page_order;
+						defrag_stats->dst_file_failed += 1<<scan_page_order;
+					}
+				} else if (!PageLRU(dest_page) && __PageMovable(dest_page)) {
+					failed += 1<<scan_page_order;
+					defrag_stats->dst_misc_failed += 1<<scan_page_order;
+					pr_debug("non-lru movable page exchange\n");
+				} else {
+					failed += 1<<scan_page_order;
+					/* unmovable pages  */
+					defrag_stats->dst_misc_failed += 1<<scan_page_order;
+					pr_debug("unmovable pages exchange\n");
+				}
+				pr_debug("exchange result: %d\n", err);
+
+				if (err == -EAGAIN)
+					goto retry_defrag;
+				if (!err)
+					defrag_stats->migrated += 1<<scan_page_order;
+				else {
+
+			defrag_stats->not_defrag_vpn = scan_address + page_size;
+			goto quit_defrag;
+				}
+
+			}
+		}
+
+	}
+quit_defrag:
+	return failed;
+}
+
+void dump_anchor_info(struct vm_area_struct *vma, unsigned long scan_address)
+{
+	struct interval_tree_node *iter;
+
+	pr_info("addr: %lx in vma [%lx, %lx)\n", scan_address, vma->vm_start, vma->vm_end);
+
+	for (iter = interval_tree_iter_first(&vma->anchor_page_rb, vma->vm_start, vma->vm_end);
+		 iter;
+		 iter = interval_tree_iter_next(iter, vma->vm_start, vma->vm_end)) {
+
+		struct anchor_page_node *info = container_of(iter, struct anchor_page_node, node);
+
+		pr_info("anchor (vpn: %lx, pfn: %lx): range [%lx, %lx]\n",
+				info->anchor_vpn, info->anchor_pfn,
+				iter->start, iter->last);
+	}
+}
+
+struct anchor_page_node *get_anchor_page_node_from_vma(struct vm_area_struct *vma,
+	unsigned long address)
+{
+	struct interval_tree_node *prev_vma_node;
+
+	prev_vma_node = interval_tree_iter_first(&vma->anchor_page_rb,
+		address, address);
+
+	if (!prev_vma_node)
+		return NULL;
+
+	return container_of(prev_vma_node, struct anchor_page_node, node);
+}
+
+unsigned long get_aligned_pfn(unsigned long vpn, unsigned long lower_pfn,
+		unsigned long offset_mask)
+{
+	unsigned long aligned_mask = ~offset_mask;
+	unsigned long vpn_offset = vpn & offset_mask;
+	unsigned long pfn_offset = lower_pfn & offset_mask;
+
+	if (vpn_offset >= pfn_offset)
+		return (lower_pfn & aligned_mask) | vpn_offset;
+
+	return ((lower_pfn + offset_mask + 1) & aligned_mask) | vpn_offset;
+}
+
+/*
+ * anchor pages decide the va pa offset in each vma
+ *
+ */
+static int find_anchor_pages_in_vma(struct mm_struct *mm,
+		struct vm_area_struct *vma, unsigned long start_addr)
+{
+	struct anchor_page_node *anchor_node;
+	struct page *anchor_page = NULL;
+	unsigned long scan_address = start_addr;
+	unsigned long end_addr = vma->vm_end - PAGE_SIZE;
+	struct interval_tree_node *existing_anchor;
+
+	/* Out of range query  */
+	if (start_addr >= vma->vm_end || start_addr < vma->vm_start)
+		return -1;
+
+	/*
+	 * Clean up unrelated anchor infor
+	 *
+	 * VMA range can change and leave some anchor info out of range,
+	 * so clean it here.
+	 * It should be cleaned when vma is changed, but the code there
+	 * is too complicated.
+	 */
+	if (!RB_EMPTY_ROOT(&vma->anchor_page_rb.rb_root) &&
+		!interval_tree_iter_first(&vma->anchor_page_rb,
+		 vma->vm_start, vma->vm_end - PAGE_SIZE)) {
+		struct interval_tree_node *node = NULL;
+
+		for (node = interval_tree_iter_first(&vma->anchor_page_rb,
+				0, (unsigned long)-1);
+			 node;) {
+			struct anchor_page_node *anchor_node = container_of(node,
+					struct anchor_page_node, node);
+			interval_tree_remove(node, &vma->anchor_page_rb);
+			node = interval_tree_iter_next(node, 0, (unsigned long)-1);
+			kfree(anchor_node);
+		}
+
+		pr_debug("Clean up anchor info. Because all are out of vma range\n");
+	}
+
+	/* no range at all  */
+	if (RB_EMPTY_ROOT(&vma->anchor_page_rb.rb_root))
+		goto insert_new_range;
+
+	/* look for first range has start_addr or after it */
+	existing_anchor = interval_tree_iter_first(&vma->anchor_page_rb,
+		start_addr, end_addr);
+
+	/* first range has start_addr or after it  */
+	if (existing_anchor) {
+		/* redundant range, do nothing */
+		if (existing_anchor->start == start_addr)
+			return 0;
+		else if (existing_anchor->start < start_addr &&
+				 existing_anchor->last >= start_addr){
+			/* cut existing range, because some not movable pages  */
+			interval_tree_remove(existing_anchor, &vma->anchor_page_rb);
+			existing_anchor->last = start_addr - PAGE_SIZE;
+			interval_tree_insert(existing_anchor, &vma->anchor_page_rb);
+			/*  add a new range [start_addr, vm_end] */
+			end_addr = vma->vm_end - PAGE_SIZE;
+			goto insert_new_range;
+		} else { /* a range after start_addr  */
+			VM_BUG_ON(!(existing_anchor->start > start_addr));
+			/* expand existing range forward  */
+			interval_tree_remove(existing_anchor, &vma->anchor_page_rb);
+			existing_anchor->start = start_addr;
+			interval_tree_insert(existing_anchor, &vma->anchor_page_rb);
+
+			goto out;
+		}
+	} else {
+		struct interval_tree_node *prev_anchor = NULL, *cur_anchor;
+		/* there is a range before start_addr  */
+
+		/* find the range just before start_addr  */
+		for (cur_anchor = interval_tree_iter_first(&vma->anchor_page_rb,
+				vma->vm_start, start_addr - PAGE_SIZE);
+			 cur_anchor;
+			 prev_anchor = cur_anchor,
+			 cur_anchor = interval_tree_iter_next(cur_anchor,
+				vma->vm_start, start_addr - PAGE_SIZE));
+
+		if (!prev_anchor) {
+			dump_anchor_info(vma, start_addr);
+			VM_BUG_ON(1);
+		}
+
+		interval_tree_remove(prev_anchor, &vma->anchor_page_rb);
+		prev_anchor->last = vma->vm_end;
+		interval_tree_insert(prev_anchor, &vma->anchor_page_rb);
+
+		goto out;
+	}
+
+insert_new_range: /* start_addr to end_addr  */
+	anchor_node =
+			kmalloc(sizeof(struct anchor_page_node), GFP_KERNEL | __GFP_ZERO);
+	if (!anchor_node)
+		return -ENOMEM;
+
+	anchor_node->node.start = start_addr;
+	anchor_node->node.last = end_addr;
+
+	/* use first available page  */
+	while (!anchor_page) {
+		down_read(&vma->vm_mm->mmap_sem);
+		anchor_page = follow_page(vma, scan_address,
+			FOLL_MIGRATION | FOLL_REMOTE);
+		up_read(&vma->vm_mm->mmap_sem);
+		scan_address += anchor_page?get_contig_page_size(anchor_page):PAGE_SIZE;
+
+		if (scan_address >= end_addr)
+			break;
+	}
+
+	if (!anchor_page) {
+		kfree(anchor_node);
+		goto out;
+	}
+
+	anchor_node->anchor_vpn = (scan_address - get_contig_page_size(anchor_page))>>PAGE_SHIFT;
+	anchor_node->anchor_pfn = page_to_pfn(anchor_page);
+
+	interval_tree_insert(&anchor_node->node, &vma->anchor_page_rb);
+
+	pr_debug("Add new node: vma: %p, [%lx, %lx], vpn: %lx, pfn: %lx",
+			vma, anchor_node->node.start, anchor_node->node.last,
+			anchor_node->anchor_vpn, anchor_node->anchor_pfn);
+
+out:
+	return 0;
+}
+
+static inline bool is_stats_collection(enum mem_defrag_action action)
+{
+	switch (action) {
+		case MEM_DEFRAG_FULL_STATS:
+		case MEM_DEFRAG_CONTIG_STATS:
+			return true;
+		default:
+			return false;
+	}
+	return false;
+}
+
+static int unsigned_long_cmp(const void *a, const void *b)
+{
+	const unsigned long *l = a, *r = b;
+	if (*l < *r)
+		return -1;
+	if (*l > *r)
+		return 1;
+	return 0;
+}
+
+/* must hold mmap_sem read  */
+static void scan_all_vma_lifetime(struct defrag_scan_control *sc)
+{
+	struct mm_struct *mm = sc->mm;
+	struct vm_area_struct *vma = NULL;
+	unsigned long current_jiffies = jiffies; /* fix one jiffies  */
+	unsigned int num_vma = 0, index = 0;
+	unsigned long *vma_scan_list = NULL;
+
+	for (vma = find_vma(mm, 0); vma; vma = vma->vm_next)
+		/* only care about to-be-defragged vmas  */
+		if (mem_defrag_vma_check(vma))
+			++num_vma;
+
+	vma_scan_list = kmalloc(num_vma*sizeof(unsigned long),
+			GFP_KERNEL | __GFP_ZERO);
+
+	if (ZERO_OR_NULL_PTR(vma_scan_list)) {
+		sc->vma_scan_threshold = 1;
+		return;
+	}
+
+	for (vma = find_vma(mm, 0); vma; vma = vma->vm_next)
+		/* only care about to-be-defragged vmas  */
+		if (mem_defrag_vma_check(vma)) {
+			if (vma_scan_threshold_type == VMA_THRESHOLD_TYPE_TIME)
+				vma_scan_list[index] = current_jiffies - vma->vma_create_jiffies;
+			else if (vma_scan_threshold_type == VMA_THRESHOLD_TYPE_SIZE)
+				vma_scan_list[index] = vma->vm_end - vma->vm_start;
+			++index;
+			if (index >=num_vma)
+				break;
+		}
+
+	/* since we do not hold mmap_sem here */
+	if (index != num_vma) {
+		pr_info("index: %d, num_vma: %d\n", index, num_vma);
+		if (index < num_vma)
+			num_vma = index;
+	}
+
+	sort(vma_scan_list, num_vma, sizeof(unsigned long),
+		 unsigned_long_cmp, NULL);
+
+	/* 50 percentile  */
+	index = (100 - vma_scan_percentile) * num_vma / 100;
+
+	sc->vma_scan_threshold = vma_scan_list[index];
+
+	kfree(vma_scan_list);
 }
 
 /*
@@ -392,77 +1281,224 @@ static int kmem_defragd_scan_mm(struct defrag_scan_control *sc)
 	char *stats_buf = NULL;
 	int remain_buf_len = sc->buf_len;
 	int err = 0;
+	struct contig_stats contig_stats;
 
 
-	if (sc->action == MEM_DEFRAG_FULL_STATS &&
+	if (sc->out_buf &&
 		sc->buf_len) {
 		stats_buf = vzalloc(sc->buf_len);
 		if (!stats_buf)
-			goto breakouterloop_mmap_sem;
+			goto breakouterloop;
 	}
 
-	down_read(&mm->mmap_sem);
+	/*down_read(&mm->mmap_sem);*/
 	if (unlikely(kmem_defragd_test_exit(mm)))
 		vma = NULL;
-	else
+	else {
+		/* get vma_scan_threshold  */
+		if (!sc->vma_scan_threshold)
+			scan_all_vma_lifetime(sc);
+
 		vma = find_vma(mm, *scan_address);
+	}
 
 	for (; vma; vma = vma->vm_next) {
 		unsigned long vstart, vend;
+		struct anchor_page_node *anchor_node = NULL;
+		int scanned_chunks = 0;
 
-		cond_resched();
+
 		if (unlikely(kmem_defragd_test_exit(mm)))
 			break;
 		if (!mem_defrag_vma_check(vma)) {
-			*scan_address = vma->vm_end;
-			if (sc->action == MEM_DEFRAG_FULL_STATS)
+			if (is_stats_collection(sc->action))
 				if (do_vma_stat(mm, vma, stats_buf, sc->buf_len - remain_buf_len,
 							&remain_buf_len))
 					goto breakouterloop;
-skip:
-			continue;
+			*scan_address = vma->vm_end;
+			goto done_one_vma;
 		}
+
+
 		vstart = vma->vm_start;
 		vend = vma->vm_end;
 		if (vstart >= vend)
-			goto skip;
+			goto done_one_vma;
 		if (*scan_address > vend)
-			goto skip;
+			goto done_one_vma;
 		if (*scan_address < vstart)
 			*scan_address = vstart;
+
+		if (sc->action == MEM_DEFRAG_DO_DEFRAG) {
+			if (vma_scan_threshold_type == VMA_THRESHOLD_TYPE_TIME) {
+				if ((jiffies - vma->vma_create_jiffies) < sc->vma_scan_threshold)
+					goto done_one_vma;
+			} else if (vma_scan_threshold_type == VMA_THRESHOLD_TYPE_SIZE) {
+				if ((vma->vm_end - vma->vm_start) < sc->vma_scan_threshold)
+					goto done_one_vma;
+			}
+			if (vma_no_repeat_defrag &&
+				vma->vma_defrag_jiffies > vma->vma_modify_jiffies)
+				goto done_one_vma;
+
+			if (remain_buf_len && stats_buf) {
+				int used_len;
+				int pos = sc->buf_len -remain_buf_len;
+
+				used_len = scnprintf(stats_buf + pos, remain_buf_len, "vma: 0x%lx, 0x%lx, "
+									 "0x%lx, -1\n",
+									 (unsigned long)vma+vma->vma_create_jiffies, vma->vm_start, vma->vm_end);
+
+				remain_buf_len -= used_len;
+
+				if (remain_buf_len == 1) {
+					stats_buf[pos] = '\0';
+					remain_buf_len = 0;
+				}
+			}
+			anchor_node = get_anchor_page_node_from_vma(vma, vma->vm_start);
+
+			if (!anchor_node) {
+				find_anchor_pages_in_vma(mm, vma, vma->vm_start);
+				anchor_node = get_anchor_page_node_from_vma(vma, vma->vm_start);
+
+				if (!anchor_node)
+					goto done_one_vma;
+			}
+		}
+
+		contig_stats = (struct contig_stats) {0};
 
 		while (*scan_address < vend) {
 			/*int ret = 1;*/
 			struct page *page;
+			/*struct anchor_page_info *anchor_page_info = NULL;*/
 
 			cond_resched();
 			if (unlikely(kmem_defragd_test_exit(mm)))
 				goto breakouterloop;
 
-			page = get_page_from_address(mm, vma, *scan_address);
+			if (is_stats_collection(sc->action)) {
+				down_read(&vma->vm_mm->mmap_sem);
+				page = follow_page(vma, *scan_address,
+						FOLL_MIGRATION | FOLL_REMOTE);
+				up_read(&vma->vm_mm->mmap_sem);
 
-			if (sc->action == MEM_DEFRAG_FULL_STATS)
 				if (do_page_stat(mm, vma, page, *scan_address,
 							stats_buf, sc->buf_len - remain_buf_len,
-							&remain_buf_len))
+							&remain_buf_len, sc->action, &contig_stats,
+							sc->scan_in_vma)) {
+					/* reset scan_address to the beginning of the contig.
+					 * So next scan will get the whole contig.
+					 */
+					if (contig_stats.err) {
+						*scan_address = contig_stats.first_vaddr_in_chunk;
+						sc->scan_in_vma = true;
+					}
 					goto breakouterloop;
-			/* move to next address */
-			if (page)
-				*scan_address += get_contig_page_size(page);
-			else
-				*scan_address += PAGE_SIZE;
+				}
+				/* move to next address */
+				if (page)
+					*scan_address += get_contig_page_size(page);
+				else
+					*scan_address += PAGE_SIZE;
+			} else if (sc->action == MEM_DEFRAG_DO_DEFRAG) {
+				/* go to nearest 2MB aligned address  */
+				unsigned long defrag_end = min_t(unsigned long,
+							(*scan_address + HPAGE_PMD_SIZE) & HPAGE_PMD_MASK,
+							vend);
+				int defrag_result;
+				/*bool found_anchor_page;*/
+				struct defrag_result_stats defrag_stats = {0};
 
-			/* we released mmap_sem so break loop */
-			/*if (ret)*/
-				/*goto breakouterloop_mmap_sem;*/
+continue_defrag:
+				anchor_node = get_anchor_page_node_from_vma(vma, *scan_address);
 
+				/*  in case VMA size changes */
+				if (!anchor_node) {
+					find_anchor_pages_in_vma(mm, vma, *scan_address);
+					anchor_node = get_anchor_page_node_from_vma(vma, *scan_address);
+				}
+
+				if (!anchor_node) {
+					goto done_one_vma;
+					dump_anchor_info(vma, *scan_address);
+					VM_BUG_ON(1);
+				}
+
+				defrag_result = defrag_address_range(mm, vma, *scan_address,
+					defrag_end,
+					pfn_to_page(anchor_node->anchor_pfn), anchor_node->anchor_vpn<<PAGE_SHIFT,
+					&defrag_stats);
+
+				if (remain_buf_len && stats_buf) {
+					int used_len;
+					int pos = sc->buf_len -remain_buf_len;
+
+					/*
+					 * aligned, migrated,
+					 * src_compound_failed,
+					 * dst_out_of_bound_failed,
+					 * dst_compound_failed, dst_free_failed,
+					 * dst_anon_failed, dst_file_failed,
+					 * dst_misc_failed;
+					 */
+					used_len = scnprintf(stats_buf + pos, remain_buf_len,
+						"[0x%lx, 0x%lx):%lu [alig:%lu, migrated:%lu, src: not:%lu, com:%lu, dst: bound:%lu, com:%lu, free:%lu, anon:%lu, file:%lu, misc:%lu], "
+						"anchor: (%lx, %lx), range: [%lx, %lx]\n",
+						*scan_address, defrag_end,
+						(defrag_end - *scan_address)/PAGE_SIZE,
+						defrag_stats.aligned,
+						defrag_stats.migrated,
+						defrag_stats.src_not_present,
+						defrag_stats.src_compound_failed,
+						defrag_stats.dst_out_of_bound_failed,
+						defrag_stats.dst_compound_failed,
+						defrag_stats.dst_free_failed,
+						defrag_stats.dst_anon_failed,
+						defrag_stats.dst_file_failed,
+						defrag_stats.dst_misc_failed,
+						anchor_node->anchor_vpn,
+						anchor_node->anchor_pfn,
+						anchor_node->node.start,
+						anchor_node->node.last
+						);
+
+					remain_buf_len -= used_len;
+
+					if (remain_buf_len == 1) {
+						stats_buf[pos] = '\0';
+						remain_buf_len = 0;
+					}
+				}
+
+				if (defrag_stats.not_defrag_vpn) {
+					VM_BUG_ON(defrag_end != vend && defrag_stats.not_defrag_vpn > defrag_end);
+					find_anchor_pages_in_vma(mm, vma, defrag_stats.not_defrag_vpn);
+
+					if (defrag_stats.not_defrag_vpn < defrag_end) {
+						/* reset and continue  */
+						*scan_address = defrag_stats.not_defrag_vpn;
+						defrag_stats.not_defrag_vpn = 0;
+						goto continue_defrag;
+					}
+				}
+				*scan_address = defrag_end;
+				scanned_chunks++;
+				if (num_breakout_chunks && scanned_chunks >= num_breakout_chunks) {
+					scanned_chunks = 0;
+					goto breakouterloop;
+				}
+			}
 		}
+done_one_vma:
+		sc->scan_in_vma = false;
+		if (sc->action == MEM_DEFRAG_DO_DEFRAG)
+			vma->vma_defrag_jiffies = jiffies;
 	}
 breakouterloop:
-	up_read(&mm->mmap_sem); /* exit_mmap will destroy ptes after this */
-breakouterloop_mmap_sem:
 
-	if (sc->action == MEM_DEFRAG_FULL_STATS &&
+	if (sc->out_buf &&
 		sc->buf_len) {
 		err = copy_to_user(sc->out_buf, stats_buf,
 				sc->buf_len - remain_buf_len);
@@ -485,6 +1521,14 @@ SYSCALL_DEFINE4(scan_process_memory, pid_t, pid, char __user *, out_buf,
 	int err = 0;
 	static struct defrag_scan_control defrag_scan_control = {0};
 	struct mm_slot *iter;
+
+	if (action == MEM_DEFRAG_PAGEBLOCK_SCAN) {
+		if (pid >= 0 && pid < MAX_NUMNODES && node_online(pid))
+			err = pageblock_scan_node(pid, out_buf, buf_len);
+		else
+			err = -EINVAL;
+		return err;
+	}
 
 	/* Find the mm_struct */
 	rcu_read_lock();
@@ -523,15 +1567,25 @@ SYSCALL_DEFINE4(scan_process_memory, pid_t, pid, char __user *, out_buf,
 
 	switch (action) {
 		case MEM_DEFRAG_SCAN:
+		case MEM_DEFRAG_CONTIG_SCAN:
+			count_vm_event(MEM_DEFRAG_SCAN_NUM);
 			/* reset scan control  */
 			if (!defrag_scan_control.mm ||
 				defrag_scan_control.mm != mm) {
+				defrag_scan_control = (struct defrag_scan_control){0};
 				defrag_scan_control.mm = mm;
-				defrag_scan_control.scan_address = 0;
 			}
 			defrag_scan_control.out_buf = out_buf;
 			defrag_scan_control.buf_len = buf_len;
-			defrag_scan_control.action = MEM_DEFRAG_FULL_STATS;
+			if (action == MEM_DEFRAG_SCAN)
+				defrag_scan_control.action = MEM_DEFRAG_FULL_STATS;
+			else if (action == MEM_DEFRAG_CONTIG_SCAN)
+				defrag_scan_control.action = MEM_DEFRAG_CONTIG_STATS;
+			else {
+				err = -EINVAL;
+				break;
+			}
+
 			defrag_scan_control.used_len = 0;
 
 			if (unlikely(!access_ok(VERIFY_WRITE, out_buf, buf_len))) {
@@ -540,7 +1594,7 @@ SYSCALL_DEFINE4(scan_process_memory, pid_t, pid, char __user *, out_buf,
 			}
 
 			/* clear mm once it is fully scanned  */
-			if (!kmem_defragd_scan_mm(&defrag_scan_control) && 
+			if (!kmem_defragd_scan_mm(&defrag_scan_control) &&
 				!defrag_scan_control.used_len)
 				defrag_scan_control.mm = NULL;
 
@@ -552,6 +1606,31 @@ SYSCALL_DEFINE4(scan_process_memory, pid_t, pid, char __user *, out_buf,
 			break;
 		case MEM_DEFRAG_CLEAR_SCAN_ALL:
 			clear_bit(MMF_VM_MEM_DEFRAG_ALL, &mm->flags);
+			break;
+		case MEM_DEFRAG_DEFRAG:
+			count_vm_event(MEM_DEFRAG_DEFRAG_NUM);
+
+			if (!defrag_scan_control.mm ||
+				defrag_scan_control.mm != mm) {
+				defrag_scan_control = (struct defrag_scan_control){0};
+				defrag_scan_control.mm = mm;
+			}
+			defrag_scan_control.action = MEM_DEFRAG_DO_DEFRAG;
+
+			defrag_scan_control.out_buf = out_buf;
+			defrag_scan_control.buf_len = buf_len;
+
+			/* clear mm once it is fully defragged */
+			if (buf_len) {
+				if (!kmem_defragd_scan_mm(&defrag_scan_control) &&
+					!defrag_scan_control.used_len) {
+					defrag_scan_control.mm = NULL;
+				}
+				err = defrag_scan_control.used_len;
+			} else {
+				if ((err = kmem_defragd_scan_mm(&defrag_scan_control)) == 0)
+					defrag_scan_control.mm = NULL;
+			}
 			break;
 		default:
 			err = -EINVAL;

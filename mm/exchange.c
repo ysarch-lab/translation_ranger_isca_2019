@@ -868,6 +868,7 @@ retry_isolate1:
 			pagevec_flushed = 1;
 			goto retry_isolate1;
 		}
+		count_vm_event(MEM_DEFRAG_SRC_ANON_PAGES_FAILED);
 		return err;
 	}
 	mod_node_page_state(page_pgdat(page1),

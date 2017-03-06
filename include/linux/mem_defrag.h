@@ -6,10 +6,15 @@
 #define MEM_DEFRAG_SCAN				0
 #define MEM_DEFRAG_MARK_SCAN_ALL	1
 #define MEM_DEFRAG_CLEAR_SCAN_ALL	2
+#define MEM_DEFRAG_DEFRAG			3
+#define MEM_DEFRAG_THP_COMPACT		4
+#define MEM_DEFRAG_CONTIG_SCAN		5
+#define MEM_DEFRAG_PAGEBLOCK_SCAN	6
 
 enum mem_defrag_action {
 	MEM_DEFRAG_FULL_STATS = 0,
 	MEM_DEFRAG_DO_DEFRAG,
+	MEM_DEFRAG_CONTIG_STATS,
 };
 
 extern int kmem_defragd_always;
@@ -18,6 +23,7 @@ extern int __kmem_defragd_enter(struct mm_struct *mm);
 extern void __kmem_defragd_exit(struct mm_struct *mm);
 extern int memdefrag_madvise(struct vm_area_struct *vma,
 		     unsigned long *vm_flags, int advice);
+extern int pageblock_scan_node(int node, char __user * out_buf, int buf_len);
 
 static inline int kmem_defragd_fork(struct mm_struct *mm, struct mm_struct *oldmm)
 {

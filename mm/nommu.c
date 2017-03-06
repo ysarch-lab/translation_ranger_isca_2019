@@ -1245,6 +1245,8 @@ unsigned long do_mmap(struct file *file,
 	region->vm_pgoff = pgoff;
 
 	INIT_LIST_HEAD(&vma->anon_vma_chain);
+	INIT_LIST_HEAD(&vma->anchor_page_list);
+	vma->anchor_page_rb = RB_ROOT_CACHED;
 	vma->vm_flags = vm_flags;
 	vma->vm_pgoff = pgoff;
 

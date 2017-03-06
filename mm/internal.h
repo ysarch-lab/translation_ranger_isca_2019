@@ -15,6 +15,7 @@
 #include <linux/mm.h>
 #include <linux/pagemap.h>
 #include <linux/tracepoint-defs.h>
+#include <linux/interval_tree.h>
 
 /*
  * The set of flags that only affect watermark checking and reclaim
@@ -544,5 +545,32 @@ bool buffer_migrate_lock_buffers(struct buffer_head *head,
 int writeout(struct address_space *mapping, struct page *page);
 
 extern int exchange_two_pages(struct page *page1, struct page *page2);
+
+struct anchor_page_info {
+	struct list_head list;
+	struct page *anchor_page;
+	unsigned long vaddr;
+	unsigned long start;
+	unsigned long end;
+	/*unsigned long offset; = (vaddr - PFN_PHYS(page_to_pfn(anchor_page))) & (HPAGE_PMD_SIZE - 1) */
+};
+
+struct anchor_page_node {
+	struct interval_tree_node node;
+	unsigned long anchor_pfn; /* struct page can be calculated from pfn_to_page()  */
+	unsigned long anchor_vpn;
+};
+
+unsigned long release_freepages(struct list_head *freelist);
+
+void free_anchor_pages(struct vm_area_struct *vma);
+
+void expand(struct zone *zone, struct page *page,
+	int low, int high, struct free_area *area,
+	int migratetype);
+
+void prep_new_page(struct page *page, unsigned int order, gfp_t gfp_flags,
+							unsigned int alloc_flags);
+
 
 #endif	/* __MM_INTERNAL_H */

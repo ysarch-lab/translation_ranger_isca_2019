@@ -160,6 +160,35 @@ void unlink_file_vma(struct vm_area_struct *vma)
 	}
 }
 
+void free_anchor_pages(struct vm_area_struct *vma)
+{
+	struct interval_tree_node *node;
+
+	if (!vma)
+		return;
+
+	while (!list_empty(&vma->anchor_page_list)) {
+		struct anchor_page_info *tmp = list_first_entry(&vma->anchor_page_list,
+					struct anchor_page_info, list);
+		list_del(&tmp->list);
+		kfree(tmp);
+	}
+
+	if (RB_EMPTY_ROOT(&vma->anchor_page_rb.rb_root))
+		return;
+
+	for (node = interval_tree_iter_first(&vma->anchor_page_rb,
+				0, (unsigned long)-1);
+		 node;) {
+		struct anchor_page_node *anchor_node = container_of(node,
+					struct anchor_page_node, node);
+		interval_tree_remove(node, &vma->anchor_page_rb);
+		node = interval_tree_iter_next(node, 0, (unsigned long)-1);
+		kfree(anchor_node);
+	}
+
+}
+
 /*
  * Close a vm structure and free it, returning the next.
  */
@@ -172,6 +201,7 @@ static struct vm_area_struct *remove_vma(struct vm_area_struct *vma)
 		vma->vm_ops->close(vma);
 	if (vma->vm_file)
 		fput(vma->vm_file);
+	free_anchor_pages(vma);
 	mpol_put(vma_policy(vma));
 	kmem_cache_free(vm_area_cachep, vma);
 	return next;
@@ -692,10 +722,15 @@ int __vma_adjust(struct vm_area_struct *vma, unsigned long start,
 	long adjust_next = 0;
 	int remove_next = 0;
 
+	/*free_anchor_pages(vma);*/
+
+	vma->vma_modify_jiffies = jiffies;
+
 	if (next && !insert) {
 		struct vm_area_struct *exporter = NULL, *importer = NULL;
 
 		if (end >= next->vm_end) {
+			/*free_anchor_pages(next);*/
 			/*
 			 * vma expands, overlapping all the next, and
 			 * perhaps the one after too (mprotect case 6).
@@ -742,6 +777,7 @@ int __vma_adjust(struct vm_area_struct *vma, unsigned long start,
 				exporter = next->vm_next;
 
 		} else if (end > next->vm_start) {
+			/*free_anchor_pages(next);*/
 			/*
 			 * vma expands, overlapping part of the next:
 			 * mprotect case 5 shifting the boundary up.
@@ -902,6 +938,7 @@ again:
 			anon_vma_merge(vma, next);
 		mm->map_count--;
 		mpol_put(vma_policy(next));
+		free_anchor_pages(next);
 		kmem_cache_free(vm_area_cachep, next);
 		/*
 		 * In mprotect's case 6 (see comments on vma_merge),
@@ -1683,6 +1720,11 @@ unsigned long mmap_region(struct file *file, unsigned long addr,
 	vma->vm_page_prot = vm_get_page_prot(vm_flags);
 	vma->vm_pgoff = pgoff;
 	INIT_LIST_HEAD(&vma->anon_vma_chain);
+	INIT_LIST_HEAD(&vma->anchor_page_list);
+	vma->anchor_page_rb = RB_ROOT_CACHED;
+	vma->vma_create_jiffies = jiffies;
+	vma->vma_modify_jiffies = jiffies;
+	vma->vma_defrag_jiffies = 0;
 
 	if (file) {
 		if (vm_flags & VM_DENYWRITE) {
@@ -1773,6 +1815,7 @@ allow_write_and_free_vma:
 	if (vm_flags & VM_DENYWRITE)
 		allow_write_access(file);
 free_vma:
+	free_anchor_pages(vma);
 	kmem_cache_free(vm_area_cachep, vma);
 unacct_error:
 	if (charged)
@@ -2569,6 +2612,11 @@ int __split_vma(struct mm_struct *mm, struct vm_area_struct *vma,
 	*new = *vma;
 
 	INIT_LIST_HEAD(&new->anon_vma_chain);
+	INIT_LIST_HEAD(&new->anchor_page_list);
+	new->anchor_page_rb = RB_ROOT_CACHED;
+	new->vma_create_jiffies = jiffies;
+	new->vma_modify_jiffies = jiffies;
+	new->vma_defrag_jiffies = 0;
 
 	if (new_below)
 		new->vm_end = addr;
@@ -2610,6 +2658,7 @@ int __split_vma(struct mm_struct *mm, struct vm_area_struct *vma,
  out_free_mpol:
 	mpol_put(vma_policy(new));
  out_free_vma:
+	free_anchor_pages(new);
 	kmem_cache_free(vm_area_cachep, new);
 	return err;
 }
@@ -2939,6 +2988,11 @@ static int do_brk_flags(unsigned long addr, unsigned long request, unsigned long
 	}
 
 	INIT_LIST_HEAD(&vma->anon_vma_chain);
+	INIT_LIST_HEAD(&vma->anchor_page_list);
+	vma->anchor_page_rb = RB_ROOT_CACHED;
+	vma->vma_create_jiffies = jiffies;
+	vma->vma_modify_jiffies = jiffies;
+	vma->vma_defrag_jiffies = 0;
 	vma->vm_mm = mm;
 	vma->vm_start = addr;
 	vma->vm_end = addr + len;
@@ -3150,6 +3204,11 @@ struct vm_area_struct *copy_vma(struct vm_area_struct **vmap,
 		if (vma_dup_policy(vma, new_vma))
 			goto out_free_vma;
 		INIT_LIST_HEAD(&new_vma->anon_vma_chain);
+		INIT_LIST_HEAD(&new_vma->anchor_page_list);
+		new_vma->anchor_page_rb = RB_ROOT_CACHED;
+		new_vma->vma_create_jiffies = jiffies;
+		new_vma->vma_modify_jiffies = jiffies;
+		new_vma->vma_defrag_jiffies = 0;
 		if (anon_vma_clone(new_vma, vma))
 			goto out_free_mempol;
 		if (new_vma->vm_file)
@@ -3164,6 +3223,7 @@ struct vm_area_struct *copy_vma(struct vm_area_struct **vmap,
 out_free_mempol:
 	mpol_put(vma_policy(new_vma));
 out_free_vma:
+	free_anchor_pages(new_vma);
 	kmem_cache_free(vm_area_cachep, new_vma);
 out:
 	return NULL;
@@ -3291,6 +3351,11 @@ static struct vm_area_struct *__install_special_mapping(
 		return ERR_PTR(-ENOMEM);
 
 	INIT_LIST_HEAD(&vma->anon_vma_chain);
+	INIT_LIST_HEAD(&vma->anchor_page_list);
+	vma->anchor_page_rb = RB_ROOT_CACHED;
+	vma->vma_create_jiffies = jiffies;
+	vma->vma_modify_jiffies = jiffies;
+	vma->vma_defrag_jiffies = 0;
 	vma->vm_mm = mm;
 	vma->vm_start = addr;
 	vma->vm_end = addr + len;
@@ -3312,6 +3377,7 @@ static struct vm_area_struct *__install_special_mapping(
 	return vma;
 
 out:
+	free_anchor_pages(vma);
 	kmem_cache_free(vm_area_cachep, vma);
 	return ERR_PTR(ret);
 }

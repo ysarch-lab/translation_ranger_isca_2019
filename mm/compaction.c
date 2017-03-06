@@ -49,7 +49,7 @@ static inline void count_compact_events(enum vm_event_item item, long delta)
 #define pageblock_start_pfn(pfn)	block_start_pfn(pfn, pageblock_order)
 #define pageblock_end_pfn(pfn)		block_end_pfn(pfn, pageblock_order)
 
-static unsigned long release_freepages(struct list_head *freelist)
+unsigned long release_freepages(struct list_head *freelist)
 {
 	struct page *page, *next;
 	unsigned long high_pfn = 0;
@@ -57,7 +57,10 @@ static unsigned long release_freepages(struct list_head *freelist)
 	list_for_each_entry_safe(page, next, freelist, lru) {
 		unsigned long pfn = page_to_pfn(page);
 		list_del(&page->lru);
-		__free_page(page);
+		if (PageCompound(page))
+			__free_pages(page, compound_order(page));
+		else
+			__free_page(page);
 		if (pfn > high_pfn)
 			high_pfn = pfn;
 	}
@@ -1592,6 +1595,8 @@ static enum compact_result compact_zone(struct zone *zone, struct compact_contro
 
 	while ((ret = compact_finished(zone, cc)) == COMPACT_CONTINUE) {
 		int err;
+		int num_migrated_pages = 0;
+		struct page *iter;
 
 		switch (isolate_migratepages(zone, cc)) {
 		case ISOLATE_ABORT:
@@ -1610,12 +1615,20 @@ static enum compact_result compact_zone(struct zone *zone, struct compact_contro
 			;
 		}
 
+		list_for_each_entry(iter, &cc->migratepages, lru)
+			num_migrated_pages++;
+
 		err = migrate_pages(&cc->migratepages, compaction_alloc,
 				compaction_free, (unsigned long)cc, cc->mode,
 				MR_COMPACTION);
 
 		trace_mm_compaction_migratepages(cc->nr_migratepages, err,
 							&cc->migratepages);
+
+		list_for_each_entry(iter, &cc->migratepages, lru)
+			num_migrated_pages--;
+
+		count_vm_events(COMPACT_MIGRATE_PAGES, num_migrated_pages);
 
 		/* All pages were either migrated or will be released */
 		cc->nr_migratepages = 0;

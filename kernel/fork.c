@@ -457,6 +457,11 @@ static __latent_entropy int dup_mmap(struct mm_struct *mm,
 			goto fail_nomem;
 		*tmp = *mpnt;
 		INIT_LIST_HEAD(&tmp->anon_vma_chain);
+		INIT_LIST_HEAD(&tmp->anchor_page_list);
+		tmp->anchor_page_rb = RB_ROOT_CACHED;
+		tmp->vma_create_jiffies = jiffies;
+		tmp->vma_modify_jiffies = jiffies;
+		tmp->vma_defrag_jiffies = 0;
 		retval = vma_dup_policy(mpnt, tmp);
 		if (retval)
 			goto fail_nomem_policy;
@@ -536,6 +541,7 @@ fail_uprobe_end:
 fail_nomem_anon_vma_fork:
 	mpol_put(vma_policy(tmp));
 fail_nomem_policy:
+	free_anchor_pages(tmp);
 	kmem_cache_free(vm_area_cachep, tmp);
 fail_nomem:
 	retval = -ENOMEM;

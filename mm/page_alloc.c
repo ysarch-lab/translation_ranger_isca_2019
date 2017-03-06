@@ -1683,7 +1683,7 @@ void __init init_cma_reserved_pageblock(struct page *page)
  *
  * -- nyc
  */
-static inline void expand(struct zone *zone, struct page *page,
+inline void expand(struct zone *zone, struct page *page,
 	int low, int high, struct free_area *area,
 	int migratetype)
 {
@@ -1805,7 +1805,7 @@ inline void post_alloc_hook(struct page *page, unsigned int order,
 	set_page_owner(page, order, gfp_flags);
 }
 
-static void prep_new_page(struct page *page, unsigned int order, gfp_t gfp_flags,
+void prep_new_page(struct page *page, unsigned int order, gfp_t gfp_flags,
 							unsigned int alloc_flags)
 {
 	int i;

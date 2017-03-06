@@ -312,6 +312,8 @@ static int __bprm_mm_init(struct linux_binprm *bprm)
 	vma->vm_flags = VM_SOFTDIRTY | VM_STACK_FLAGS | VM_STACK_INCOMPLETE_SETUP;
 	vma->vm_page_prot = vm_get_page_prot(vma->vm_flags);
 	INIT_LIST_HEAD(&vma->anon_vma_chain);
+	INIT_LIST_HEAD(&vma->anchor_page_list);
+	vma->anchor_page_rb = RB_ROOT_CACHED;
 
 	err = insert_vm_struct(mm, vma);
 	if (err)
@@ -326,6 +328,7 @@ err:
 	up_write(&mm->mmap_sem);
 err_free:
 	bprm->vma = NULL;
+	free_anchor_pages(vma);
 	kmem_cache_free(vm_area_cachep, vma);
 	return err;
 }

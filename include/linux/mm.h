@@ -2674,6 +2674,8 @@ static inline bool debug_guardpage_enabled(void) { return false; }
 static inline bool page_is_guard(struct page *page) { return false; }
 #endif /* CONFIG_DEBUG_PAGEALLOC */
 
+void free_anchor_pages(struct vm_area_struct *vma);
+
 #if MAX_NUMNODES > 1
 void __init setup_nr_node_ids(void);
 #else
