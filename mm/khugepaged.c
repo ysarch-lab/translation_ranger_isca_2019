@@ -76,6 +76,8 @@ static __read_mostly DEFINE_HASHTABLE(mm_slots_hash, MM_SLOTS_HASH_BITS);
 
 static struct kmem_cache *mm_slot_cache __read_mostly;
 
+int khugepaged_daemon;
+
 /**
  * struct mm_slot - hash lookup from mm to mm_slot
  * @hash: hash collision list
@@ -1659,6 +1661,89 @@ static void khugepaged_scan_shmem(struct mm_struct *mm,
 }
 #endif
 
+unsigned int khugepaged_scan_mm(struct mm_struct *mm)
+	__releases(&khugepaged_mm_lock)
+	__acquires(&khugepaged_mm_lock)
+{
+	struct vm_area_struct *vma;
+	int progress = 0;
+	unsigned long scan_address = 0;
+	struct page *hpage = NULL;
+
+
+	down_read(&mm->mmap_sem);
+	if (unlikely(khugepaged_test_exit(mm)))
+		vma = NULL;
+	else
+		vma = find_vma(mm, scan_address);
+
+	progress++;
+	for (; vma; vma = vma->vm_next) {
+		unsigned long hstart, hend;
+
+		cond_resched();
+		if (unlikely(khugepaged_test_exit(mm))) {
+			progress++;
+			break;
+		}
+		if (!hugepage_vma_check(vma)) {
+skip:
+			progress++;
+			continue;
+		}
+		hstart = (vma->vm_start + ~HPAGE_PMD_MASK) & HPAGE_PMD_MASK;
+		hend = vma->vm_end & HPAGE_PMD_MASK;
+		if (hstart >= hend)
+			goto skip;
+		if (scan_address > hend)
+			goto skip;
+		if (scan_address < hstart)
+			scan_address = hstart;
+		VM_BUG_ON(scan_address & ~HPAGE_PMD_MASK);
+
+		while (scan_address < hend) {
+			int ret;
+			bool wait = false;
+			cond_resched();
+			if (unlikely(khugepaged_test_exit(mm)))
+				goto breakouterloop;
+
+			if (!khugepaged_prealloc_page(&hpage, &wait))
+				goto breakouterloop;
+
+			VM_BUG_ON(scan_address < hstart ||
+				  scan_address + HPAGE_PMD_SIZE > hend);
+			if (shmem_file(vma->vm_file)) {
+				struct file *file;
+				pgoff_t pgoff = linear_page_index(vma,
+						scan_address);
+				if (!shmem_huge_enabled(vma))
+					goto skip;
+				file = get_file(vma->vm_file);
+				up_read(&mm->mmap_sem);
+				ret = 1;
+				khugepaged_scan_shmem(mm, file->f_mapping,
+						pgoff, &hpage);
+				fput(file);
+			} else {
+				ret = khugepaged_scan_pmd(mm, vma,
+						scan_address,
+						&hpage);
+			}
+			/* move to next address */
+			scan_address += HPAGE_PMD_SIZE;
+			progress += HPAGE_PMD_NR;
+			if (ret)
+				/* we released mmap_sem */
+				down_read(&mm->mmap_sem);
+		}
+	}
+breakouterloop:
+	up_read(&mm->mmap_sem); /* exit_mmap will destroy ptes after this */
+
+	return progress;
+}
+
 static unsigned int khugepaged_scan_mm_slot(unsigned int pages,
 					    struct page **hpage)
 	__releases(&khugepaged_mm_lock)
@@ -1788,7 +1873,7 @@ breakouterloop_mmap_sem:
 static int khugepaged_has_work(void)
 {
 	return !list_empty(&khugepaged_scan.mm_head) &&
-		khugepaged_enabled();
+		khugepaged_enabled() && khugepaged_daemon;
 }
 
 static int khugepaged_wait_event(void)

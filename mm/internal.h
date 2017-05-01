@@ -572,5 +572,6 @@ void expand(struct zone *zone, struct page *page,
 void prep_new_page(struct page *page, unsigned int order, gfp_t gfp_flags,
 							unsigned int alloc_flags);
 
+unsigned int khugepaged_scan_mm(struct mm_struct *mm);
 
 #endif	/* __MM_INTERNAL_H */

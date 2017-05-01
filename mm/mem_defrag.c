@@ -1632,6 +1632,9 @@ SYSCALL_DEFINE4(scan_process_memory, pid_t, pid, char __user *, out_buf,
 					defrag_scan_control.mm = NULL;
 			}
 			break;
+		case MEM_DEFRAG_THP_COMPACT:
+			khugepaged_scan_mm(mm);
+			break;
 		default:
 			err = -EINVAL;
 			break;

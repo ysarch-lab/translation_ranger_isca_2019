@@ -119,6 +119,7 @@ extern int vma_scan_percentile;
 extern int vma_scan_threshold_type;
 extern int vma_no_repeat_defrag;
 extern int num_breakout_chunks;
+extern int khugepaged_daemon;
 
 /* Constants used for minimum and  maximum */
 #ifdef CONFIG_LOCKUP_DETECTOR
@@ -1699,6 +1700,15 @@ static struct ctl_table vm_table[] = {
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_minmax,
 		.extra1		= &zero,
+	},
+	{
+		.procname	= "khugepaged_daemon",
+		.data		= &khugepaged_daemon,
+		.maxlen		= sizeof(khugepaged_daemon),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &zero,
+		.extra2		= &one,
 	},
 	{ }
 };
