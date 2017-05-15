@@ -1873,7 +1873,7 @@ breakouterloop_mmap_sem:
 static int khugepaged_has_work(void)
 {
 	return !list_empty(&khugepaged_scan.mm_head) &&
-		khugepaged_enabled() && khugepaged_daemon;
+		khugepaged_enabled();
 }
 
 static int khugepaged_wait_event(void)
@@ -1898,6 +1898,9 @@ static void khugepaged_do_scan(void)
 		cond_resched();
 
 		if (unlikely(kthread_should_stop() || try_to_freeze()))
+			break;
+
+		if (!khugepaged_daemon)
 			break;
 
 		spin_lock(&khugepaged_mm_lock);
