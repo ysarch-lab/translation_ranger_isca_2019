@@ -1530,6 +1530,14 @@ SYSCALL_DEFINE4(scan_process_memory, pid_t, pid, char __user *, out_buf,
 		return err;
 	}
 
+	if (action == MEM_DEFRAG_FLUSH_TLB) {
+		unsigned long addr = (unsigned long)out_buf;
+		if (pid != 0)
+			err = -EINVAL;
+		__flush_tlb_one_user(addr);
+		return err;
+	}
+
 	/* Find the mm_struct */
 	rcu_read_lock();
 	task = pid ? find_task_by_vpid(pid) : current;

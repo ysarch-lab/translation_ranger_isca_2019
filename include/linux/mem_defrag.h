@@ -10,6 +10,7 @@
 #define MEM_DEFRAG_THP_COMPACT		4
 #define MEM_DEFRAG_CONTIG_SCAN		5
 #define MEM_DEFRAG_PAGEBLOCK_SCAN	6
+#define MEM_DEFRAG_FLUSH_TLB		7
 
 enum mem_defrag_action {
 	MEM_DEFRAG_FULL_STATS = 0,
