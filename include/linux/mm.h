@@ -1945,6 +1945,8 @@ static inline spinlock_t *pud_lock(struct mm_struct *mm, pud_t *pud)
 	return ptl;
 }
 
+#define pud_huge_pte(mm, pud) ((mm)->pud_huge_pte)
+
 extern void __init pagecache_init(void);
 extern void free_area_init(unsigned long * zones_size);
 extern void free_area_init_node(int nid, unsigned long * zones_size,

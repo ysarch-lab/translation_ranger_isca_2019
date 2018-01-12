@@ -160,6 +160,19 @@ void pgtable_trans_huge_deposit(struct mm_struct *mm, pmd_t *pmdp,
 		list_add(&pgtable->lru, &pmd_huge_pte(mm, pmdp)->lru);
 	pmd_huge_pte(mm, pmdp) = pgtable;
 }
+
+void pgtable_trans_huge_pud_deposit(struct mm_struct *mm, pud_t *pudp,
+				pgtable_t pgtable)
+{
+	assert_spin_locked(pud_lockptr(mm, pudp));
+
+	/* FIFO */
+	if (!pud_huge_pte(mm, pudp))
+		INIT_LIST_HEAD(&pgtable->lru);
+	else
+		list_add(&pgtable->lru, &pud_huge_pte(mm, pudp)->lru);
+	pud_huge_pte(mm, pudp) = pgtable;
+}
 #endif
 
 #ifndef __HAVE_ARCH_PGTABLE_WITHDRAW
@@ -175,6 +188,21 @@ pgtable_t pgtable_trans_huge_withdraw(struct mm_struct *mm, pmd_t *pmdp)
 	pmd_huge_pte(mm, pmdp) = list_first_entry_or_null(&pgtable->lru,
 							  struct page, lru);
 	if (pmd_huge_pte(mm, pmdp))
+		list_del(&pgtable->lru);
+	return pgtable;
+}
+
+pgtable_t pgtable_trans_huge_pud_withdraw(struct mm_struct *mm, pud_t *pudp)
+{
+	pgtable_t pgtable;
+
+	assert_spin_locked(pud_lockptr(mm, pudp));
+
+	/* FIFO */
+	pgtable = pud_huge_pte(mm, pudp);
+	pud_huge_pte(mm, pudp) = list_first_entry_or_null(&pgtable->lru,
+							  struct page, lru);
+	if (pud_huge_pte(mm, pudp))
 		list_del(&pgtable->lru);
 	return pgtable;
 }

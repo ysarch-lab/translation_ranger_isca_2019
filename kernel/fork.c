@@ -918,6 +918,7 @@ static struct mm_struct *mm_init(struct mm_struct *mm, struct task_struct *p,
 #if defined(CONFIG_TRANSPARENT_HUGEPAGE) && !USE_SPLIT_PMD_PTLOCKS
 	mm->pmd_huge_pte = NULL;
 #endif
+	mm->pud_huge_pte = NULL;
 	mm_init_uprobes_state(mm);
 
 	if (current->mm) {

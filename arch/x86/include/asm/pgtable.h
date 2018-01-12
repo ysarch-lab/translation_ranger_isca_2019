@@ -1089,6 +1089,8 @@ static inline pmd_t pmdp_huge_get_and_clear(struct mm_struct *mm, unsigned long 
 	return native_pmdp_get_and_clear(pmdp);
 }
 
+#define mk_pud(page, pgprot)   pfn_pud(page_to_pfn(page), (pgprot))
+
 #define __HAVE_ARCH_PUDP_HUGE_GET_AND_CLEAR
 static inline pud_t pudp_huge_get_and_clear(struct mm_struct *mm,
 					unsigned long addr, pud_t *pudp)
