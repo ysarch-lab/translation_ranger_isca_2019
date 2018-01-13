@@ -910,7 +910,7 @@ static int __do_huge_pud_anonymous_page(struct vm_fault *vmf, struct page *page,
 
 	if (mem_cgroup_try_charge(page, vma->vm_mm, gfp, &memcg, true)) {
 		put_page(page);
-		count_vm_event(THP_FAULT_FALLBACK);
+		count_vm_event(THP_FAULT_FALLBACK_PUD);
 		return VM_FAULT_FALLBACK;
 	}
 
@@ -961,7 +961,7 @@ static int __do_huge_pud_anonymous_page(struct vm_fault *vmf, struct page *page,
 		add_mm_counter(vma->vm_mm, MM_ANONPAGES, HPAGE_PUD_NR);
 		mm_inc_nr_ptes(vma->vm_mm);
 		spin_unlock(vmf->ptl);
-		count_vm_event(THP_FAULT_ALLOC);
+		count_vm_event(THP_FAULT_ALLOC_PUD);
 	}
 
 	return 0;
@@ -1019,7 +1019,7 @@ int do_huge_pud_anonymous_page(struct vm_fault *vmf)
 		zero_page = mm_get_huge_pud_zero_page(vma->vm_mm);
 		if (unlikely(!zero_page)) {
 			pte_free(vma->vm_mm, pgtable);
-			count_vm_event(THP_FAULT_FALLBACK);
+			count_vm_event(THP_FAULT_FALLBACK_PUD);
 			return VM_FAULT_FALLBACK;
 		}
 		vmf->ptl = pud_lock(vma->vm_mm, vmf->pud);
@@ -1048,7 +1048,7 @@ int do_huge_pud_anonymous_page(struct vm_fault *vmf)
 	gfp = alloc_hugepage_direct_gfpmask(vma);
 	page = alloc_hugepage_vma(gfp, vma, haddr, HPAGE_PUD_ORDER);
 	if (unlikely(!page)) {
-		count_vm_event(THP_FAULT_FALLBACK);
+		count_vm_event(THP_FAULT_FALLBACK_PUD);
 		return VM_FAULT_FALLBACK;
 	}
 	prep_transhuge_page(page);

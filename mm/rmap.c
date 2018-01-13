@@ -1118,8 +1118,12 @@ void do_page_add_anon_rmap(struct page *page,
 		 * pte lock(a spinlock) is held, which implies preemption
 		 * disabled.
 		 */
-		if (compound)
-			__inc_node_page_state(page, NR_ANON_THPS);
+		if (compound) {
+			if (nr == HPAGE_PMD_NR)
+				__inc_node_page_state(page, NR_ANON_THPS);
+			else
+				__inc_node_page_state(page, NR_ANON_THPS_PUD);
+		}
 		__mod_node_page_state(page_pgdat(page), NR_ANON_MAPPED, nr);
 	}
 	if (unlikely(PageKsm(page)))
@@ -1157,7 +1161,10 @@ void page_add_new_anon_rmap(struct page *page,
 		VM_BUG_ON_PAGE(!PageTransHuge(page), page);
 		/* increment count (starts at -1) */
 		atomic_set(compound_mapcount_ptr(page), 0);
-		__inc_node_page_state(page, NR_ANON_THPS);
+		if (nr == HPAGE_PMD_NR)
+			__inc_node_page_state(page, NR_ANON_THPS);
+		else
+			__inc_node_page_state(page, NR_ANON_THPS_PUD);
 	} else {
 		/* Anon THP always mapped first with PMD */
 		VM_BUG_ON_PAGE(PageTransCompound(page), page);
@@ -1261,19 +1268,22 @@ static void page_remove_anon_compound_rmap(struct page *page)
 	if (!IS_ENABLED(CONFIG_TRANSPARENT_HUGEPAGE))
 		return;
 
-	__dec_node_page_state(page, NR_ANON_THPS);
+	if (hpage_nr_pages(page) == HPAGE_PMD_NR)
+		__dec_node_page_state(page, NR_ANON_THPS);
+	else
+		__dec_node_page_state(page, NR_ANON_THPS_PUD);
 
 	if (TestClearPageDoubleMap(page)) {
 		/*
 		 * Subpages can be mapped with PTEs too. Check how many of
 		 * themi are still mapped.
 		 */
-		for (i = 0, nr = 0; i < HPAGE_PMD_NR; i++) {
+		for (i = 0, nr = 0; i < hpage_nr_pages(page); i++) {
 			if (atomic_add_negative(-1, &page[i]._mapcount))
 				nr++;
 		}
 	} else {
-		nr = HPAGE_PMD_NR;
+		nr = hpage_nr_pages(page);
 	}
 
 	if (unlikely(PageMlocked(page)))
