@@ -1009,16 +1009,25 @@ int do_huge_pud_anonymous_page(struct vm_fault *vmf)
 	if (!(vmf->flags & FAULT_FLAG_WRITE) &&
 			!mm_forbids_zeropage(vma->vm_mm) &&
 			transparent_hugepage_use_zero_page()) {
-		pgtable_t pgtable;
+		pgtable_t pgtable, pmd_pgtable;
 		struct page *zero_page;
 		bool set;
 		int ret;
-		pgtable = pte_alloc_one(vma->vm_mm, haddr);
-		if (unlikely(!pgtable))
+		pmd_pgtable = pte_alloc_order(vma->vm_mm, haddr,
+			HPAGE_PUD_ORDER - HPAGE_PMD_ORDER);
+		if (!pmd_pgtable)
 			return VM_FAULT_OOM;
+		pgtable = pte_alloc_one(vma->vm_mm, haddr);
+		if (unlikely(!pgtable)) {
+			pte_free_order(vma->vm_mm, pmd_pgtable,
+				HPAGE_PUD_ORDER - HPAGE_PMD_ORDER);
+			return VM_FAULT_OOM;
+		}
 		zero_page = mm_get_huge_pud_zero_page(vma->vm_mm);
 		if (unlikely(!zero_page)) {
 			pte_free(vma->vm_mm, pgtable);
+			pte_free_order(vma->vm_mm, pmd_pgtable,
+				HPAGE_PUD_ORDER - HPAGE_PMD_ORDER);
 			count_vm_event(THP_FAULT_FALLBACK_PUD);
 			return VM_FAULT_FALLBACK;
 		}
@@ -1041,8 +1050,11 @@ int do_huge_pud_anonymous_page(struct vm_fault *vmf)
 			}
 		} else
 			spin_unlock(vmf->ptl);
-		if (!set)
+		if (!set) {
 			pte_free(vma->vm_mm, pgtable);
+			pte_free_order(vma->vm_mm, pmd_pgtable,
+				HPAGE_PUD_ORDER - HPAGE_PMD_ORDER);
+		}
 		return ret;
 	}
 	gfp = alloc_hugepage_direct_gfpmask(vma);
@@ -1354,7 +1366,7 @@ static int do_huge_pud_wp_page_fallback(struct vm_fault *vmf, pud_t orig_pud,
 	struct vm_area_struct *vma = vmf->vma;
 	unsigned long haddr = vmf->address & HPAGE_PUD_MASK;
 	struct mem_cgroup *memcg;
-	pgtable_t pgtable;
+	pgtable_t pgtable, pmd_pgtable;
 	pud_t _pud;
 	int ret = 0, i, j;
 	struct page **pages;
@@ -1366,6 +1378,13 @@ static int do_huge_pud_wp_page_fallback(struct vm_fault *vmf, pud_t orig_pud,
 	if (unlikely(!pages)) {
 		ret |= VM_FAULT_OOM;
 		goto out;
+	}
+
+	pmd_pgtable = pte_alloc_order(vma->vm_mm, haddr,
+		HPAGE_PUD_ORDER - HPAGE_PMD_ORDER);
+	if (!pmd_pgtable) {
+		ret |= VM_FAULT_OOM;
+		goto out_kfree_pages;
 	}
 
 	for (i = 0; i < (1<<(HPAGE_PUD_ORDER-HPAGE_PMD_ORDER)); i++) {
@@ -1384,10 +1403,14 @@ static int do_huge_pud_wp_page_fallback(struct vm_fault *vmf, pud_t orig_pud,
 				put_page(pages[i]);
 			}
 			kfree(pages);
+			pte_free_order(vma->vm_mm, pmd_pgtable,
+				HPAGE_PMD_ORDER - HPAGE_PMD_ORDER);
 			ret |= VM_FAULT_OOM;
 			goto out;
 		}
+		count_vm_event(THP_FAULT_ALLOC);
 		set_page_private(pages[i], (unsigned long)memcg);
+		prep_transhuge_page(pages[i]);
 	}
 
 	for (i = 0; i < (1<<(HPAGE_PUD_ORDER-HPAGE_PMD_ORDER)); i++) {
@@ -1433,6 +1456,7 @@ static int do_huge_pud_wp_page_fallback(struct vm_fault *vmf, pud_t orig_pud,
 		lru_cache_add_active_or_unevictable(pages[i], vma);
 		vmf->pmd = pmd_offset(&_pud, haddr);
 		VM_BUG_ON(!pmd_none(*vmf->pmd));
+		pgtable_trans_huge_deposit(vma->vm_mm, vmf->pmd, &pmd_pgtable[i]);
 		set_pmd_at(vma->vm_mm, haddr, vmf->pmd, entry);
 	}
 	kfree(pages);
@@ -1464,6 +1488,7 @@ out_free_pages:
 		mem_cgroup_cancel_charge(pages[i], memcg, true);
 		put_page(pages[i]);
 	}
+out_kfree_pages:
 	kfree(pages);
 	goto out;
 }
