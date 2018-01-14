@@ -1263,7 +1263,12 @@ int copy_huge_pud(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 {
 	spinlock_t *dst_ptl, *src_ptl;
 	pud_t pud;
-	int ret;
+	pgtable_t pgtable = NULL;
+	int ret = -ENOMEM;
+
+	pgtable = pte_alloc_one(dst_mm, addr);
+	if (unlikely(!pgtable))
+		goto out;
 
 	dst_ptl = pud_lock(dst_mm, dst_pud);
 	src_ptl = pud_lockptr(src_mm, src_pud);
@@ -1271,8 +1276,13 @@ int copy_huge_pud(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 
 	ret = -EAGAIN;
 	pud = *src_pud;
-	if (unlikely(!pud_trans_huge(pud) && !pud_devmap(pud)))
+	if (unlikely(!pud_trans_huge(pud) && !pud_devmap(pud))) {
+		pte_free(dst_mm, pgtable);
 		goto out_unlock;
+	}
+
+	if (pud_devmap(pud))
+		pte_free(dst_mm, pgtable);
 
 	/*
 	 * When page table lock is held, the huge zero pud should not be
@@ -1280,7 +1290,29 @@ int copy_huge_pud(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 	 * a page table.
 	 */
 	if (is_huge_zero_pud(pud)) {
-		/* No huge zero pud yet */
+		struct page *zero_page;
+		/*
+		 * get_huge_zero_page() will never allocate a new page here,
+		 * since we already have a zero page to copy. It just takes a
+		 * reference.
+		 */
+		zero_page = mm_get_huge_pud_zero_page(dst_mm);
+		set_huge_pud_zero_page(pgtable, dst_mm, vma, addr, dst_pud,
+				zero_page);
+		ret = 0;
+		goto out_unlock;
+	}
+
+	if (pud_trans_huge(pud)) {
+		struct page *src_page;
+
+		src_page = pud_page(pud);
+		VM_BUG_ON_PAGE(!PageHead(src_page), src_page);
+		get_page(src_page);
+		page_dup_rmap(src_page, true);
+		add_mm_counter(dst_mm, MM_ANONPAGES, HPAGE_PUD_NR);
+		mm_inc_nr_ptes(dst_mm);
+		pgtable_trans_huge_pud_deposit(dst_mm, dst_pud, pgtable);
 	}
 
 	pudp_set_wrprotect(src_mm, addr, src_pud);
@@ -1291,6 +1323,7 @@ int copy_huge_pud(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 out_unlock:
 	spin_unlock(src_ptl);
 	spin_unlock(dst_ptl);
+out:
 	return ret;
 }
 
@@ -1314,6 +1347,271 @@ void huge_pud_set_accessed(struct vm_fault *vmf, pud_t orig_pud)
 unlock:
 	spin_unlock(vmf->ptl);
 }
+
+static int do_huge_pud_wp_page_fallback(struct vm_fault *vmf, pud_t orig_pud,
+		struct page *page)
+{
+	struct vm_area_struct *vma = vmf->vma;
+	unsigned long haddr = vmf->address & HPAGE_PUD_MASK;
+	struct mem_cgroup *memcg;
+	pgtable_t pgtable;
+	pud_t _pud;
+	int ret = 0, i, j;
+	struct page **pages;
+	unsigned long mmun_start;	/* For mmu_notifiers */
+	unsigned long mmun_end;		/* For mmu_notifiers */
+
+	pages = kmalloc(sizeof(struct page *) * HPAGE_PUD_NR,
+			GFP_KERNEL);
+	if (unlikely(!pages)) {
+		ret |= VM_FAULT_OOM;
+		goto out;
+	}
+
+	for (i = 0; i < (1<<(HPAGE_PUD_ORDER-HPAGE_PMD_ORDER)); i++) {
+		pages[i] = alloc_page_vma_node(GFP_TRANSHUGE, vma,
+					       vmf->address, page_to_nid(page));
+		if (unlikely(!pages[i] ||
+			     mem_cgroup_try_charge(pages[i], vma->vm_mm,
+				     GFP_KERNEL, &memcg, true))) {
+			if (pages[i])
+				put_page(pages[i]);
+			while (--i >= 0) {
+				memcg = (void *)page_private(pages[i]);
+				set_page_private(pages[i], 0);
+				mem_cgroup_cancel_charge(pages[i], memcg,
+						true);
+				put_page(pages[i]);
+			}
+			kfree(pages);
+			ret |= VM_FAULT_OOM;
+			goto out;
+		}
+		set_page_private(pages[i], (unsigned long)memcg);
+	}
+
+	for (i = 0; i < (1<<(HPAGE_PUD_ORDER-HPAGE_PMD_ORDER)); i++) {
+		for (j = 0; j < HPAGE_PMD_NR; j++) {
+			copy_user_highpage(pages[i] + j, page + i * HPAGE_PMD_NR + j,
+					   haddr + PAGE_SIZE * (i * HPAGE_PMD_NR + j), vma);
+			cond_resched();
+		}
+		__SetPageUptodate(pages[i]);
+	}
+
+	mmun_start = haddr;
+	mmun_end   = haddr + HPAGE_PUD_SIZE;
+	mmu_notifier_invalidate_range_start(vma->vm_mm, mmun_start, mmun_end);
+
+	vmf->ptl = pud_lock(vma->vm_mm, vmf->pud);
+	if (unlikely(!pud_same(*vmf->pud, orig_pud)))
+		goto out_free_pages;
+	VM_BUG_ON_PAGE(!PageHead(page), page);
+
+	/*
+	 * Leave pmd empty until pte is filled note we must notify here as
+	 * concurrent CPU thread might write to new page before the call to
+	 * mmu_notifier_invalidate_range_end() happens which can lead to a
+	 * device seeing memory write in different order than CPU.
+	 *
+	 * See Documentation/vm/mmu_notifier.txt
+	 */
+	pmdp_huge_clear_flush_notify(vma, haddr, vmf->pmd);
+
+	pgtable = pgtable_trans_huge_pud_withdraw(vma->vm_mm, vmf->pud);
+	pud_populate_with_pgtable(vma->vm_mm, &_pud, pgtable);
+
+	for (i = 0; i < (1<<(HPAGE_PUD_ORDER-HPAGE_PMD_ORDER));
+		 i++, haddr += (PAGE_SIZE * HPAGE_PMD_NR)) {
+		pmd_t entry;
+		entry = mk_huge_pmd(pages[i], vma->vm_page_prot);
+		entry = maybe_pmd_mkwrite(pmd_mkdirty(entry), vma);
+		memcg = (void *)page_private(pages[i]);
+		set_page_private(pages[i], 0);
+		page_add_new_anon_rmap(pages[i], vmf->vma, haddr, true);
+		mem_cgroup_commit_charge(pages[i], memcg, false, true);
+		lru_cache_add_active_or_unevictable(pages[i], vma);
+		vmf->pmd = pmd_offset(&_pud, haddr);
+		VM_BUG_ON(!pmd_none(*vmf->pmd));
+		set_pmd_at(vma->vm_mm, haddr, vmf->pmd, entry);
+	}
+	kfree(pages);
+
+	smp_wmb(); /* make pte visible before pmd */
+	pud_populate_with_pgtable(vma->vm_mm, vmf->pud, pgtable);
+	page_remove_rmap(page, true);
+	spin_unlock(vmf->ptl);
+
+	/*
+	 * No need to double call mmu_notifier->invalidate_range() callback as
+	 * the above pmdp_huge_clear_flush_notify() did already call it.
+	 */
+	mmu_notifier_invalidate_range_only_end(vma->vm_mm, mmun_start,
+						mmun_end);
+
+	ret |= VM_FAULT_WRITE;
+	put_page(page);
+
+out:
+	return ret;
+
+out_free_pages:
+	spin_unlock(vmf->ptl);
+	mmu_notifier_invalidate_range_end(vma->vm_mm, mmun_start, mmun_end);
+	for (i = 0; i < (1<<(HPAGE_PUD_ORDER-HPAGE_PMD_ORDER)); i++) {
+		memcg = (void *)page_private(pages[i]);
+		set_page_private(pages[i], 0);
+		mem_cgroup_cancel_charge(pages[i], memcg, true);
+		put_page(pages[i]);
+	}
+	kfree(pages);
+	goto out;
+}
+
+int do_huge_pud_wp_page(struct vm_fault *vmf, pud_t orig_pud)
+{
+	struct vm_area_struct *vma = vmf->vma;
+	struct page *page = NULL, *new_page;
+	struct mem_cgroup *memcg;
+	unsigned long haddr = vmf->address & HPAGE_PUD_MASK;
+	unsigned long mmun_start;	/* For mmu_notifiers */
+	unsigned long mmun_end;		/* For mmu_notifiers */
+	gfp_t huge_gfp;			/* for allocation and charge */
+	int ret = 0;
+
+	vmf->ptl = pud_lockptr(vma->vm_mm, vmf->pud);
+	VM_BUG_ON_VMA(!vma->anon_vma, vma);
+	if (is_huge_zero_pud(orig_pud))
+		goto alloc;
+	spin_lock(vmf->ptl);
+	if (unlikely(!pud_same(*vmf->pud, orig_pud)))
+		goto out_unlock;
+
+	page = pud_page(orig_pud);
+	VM_BUG_ON_PAGE(!PageCompound(page) || !PageHead(page), page);
+	/*
+	 * We can only reuse the page if nobody else maps the huge page or it's
+	 * part.
+	 */
+	if (!trylock_page(page)) {
+		get_page(page);
+		spin_unlock(vmf->ptl);
+		lock_page(page);
+		spin_lock(vmf->ptl);
+		if (unlikely(!pud_same(*vmf->pud, orig_pud))) {
+			unlock_page(page);
+			put_page(page);
+			goto out_unlock;
+		}
+		put_page(page);
+	}
+	if (reuse_swap_page(page, NULL)) {
+		pud_t entry;
+		entry = pud_mkyoung(orig_pud);
+		entry = maybe_pud_mkwrite(pud_mkdirty(entry), vma);
+		if (pudp_set_access_flags(vma, haddr, vmf->pud, entry,  1))
+			update_mmu_cache_pud(vma, vmf->address, vmf->pud);
+		ret |= VM_FAULT_WRITE;
+		unlock_page(page);
+		goto out_unlock;
+	}
+	unlock_page(page);
+	get_page(page);
+	spin_unlock(vmf->ptl);
+alloc:
+	if (transparent_hugepage_enabled(vma) &&
+	    !transparent_hugepage_debug_cow()) {
+		huge_gfp = alloc_hugepage_direct_gfpmask(vma);
+		new_page = alloc_hugepage_vma(huge_gfp, vma, haddr, HPAGE_PUD_ORDER);
+	} else
+		new_page = NULL;
+
+	if (likely(new_page)) {
+		prep_transhuge_page(new_page);
+	} else {
+		if (!page) {
+			WARN("%s: split_huge_page\n", __func__);
+			split_huge_pud(vma, vmf->pud, vmf->address);
+			ret |= VM_FAULT_FALLBACK;
+		} else {
+			ret = do_huge_pud_wp_page_fallback(vmf, orig_pud, page);
+			if (ret & VM_FAULT_OOM) {
+				WARN("%s: split_huge_page after wp fallback\n", __func__);
+				split_huge_pud(vma, vmf->pud, vmf->address);
+				ret |= VM_FAULT_FALLBACK;
+			}
+			put_page(page);
+		}
+		count_vm_event(THP_FAULT_FALLBACK_PUD);
+		goto out;
+	}
+
+	if (unlikely(mem_cgroup_try_charge(new_page, vma->vm_mm,
+					huge_gfp, &memcg, true))) {
+		put_page(new_page);
+		WARN("%s: split_huge_page after mem cgroup failed\n", __func__);
+		split_huge_pud(vma, vmf->pud, vmf->address);
+		if (page)
+			put_page(page);
+		ret |= VM_FAULT_FALLBACK;
+		count_vm_event(THP_FAULT_FALLBACK_PUD);
+		goto out;
+	}
+
+	count_vm_event(THP_FAULT_ALLOC_PUD);
+
+	if (!page)
+		clear_huge_page(new_page, vmf->address, HPAGE_PUD_NR);
+	else
+		copy_user_huge_page(new_page, page, haddr, vma, HPAGE_PUD_NR);
+	__SetPageUptodate(new_page);
+
+	mmun_start = haddr;
+	mmun_end   = haddr + HPAGE_PUD_SIZE;
+	mmu_notifier_invalidate_range_start(vma->vm_mm, mmun_start, mmun_end);
+
+	spin_lock(vmf->ptl);
+	if (page)
+		put_page(page);
+	if (unlikely(!pud_same(*vmf->pud, orig_pud))) {
+		spin_unlock(vmf->ptl);
+		mem_cgroup_cancel_charge(new_page, memcg, true);
+		put_page(new_page);
+		goto out_mn;
+	} else {
+		pud_t entry;
+		entry = mk_huge_pud(new_page, vma->vm_page_prot);
+		entry = maybe_pud_mkwrite(pud_mkdirty(entry), vma);
+		pudp_huge_clear_flush_notify(vma, haddr, vmf->pud);
+		page_add_new_anon_rmap(new_page, vma, haddr, true);
+		mem_cgroup_commit_charge(new_page, memcg, false, true);
+		lru_cache_add_active_or_unevictable(new_page, vma);
+		set_pud_at(vma->vm_mm, haddr, vmf->pud, entry);
+		update_mmu_cache_pud(vma, vmf->address, vmf->pud);
+		if (!page) {
+			add_mm_counter(vma->vm_mm, MM_ANONPAGES, HPAGE_PUD_NR);
+		} else {
+			VM_BUG_ON_PAGE(!PageHead(page), page);
+			page_remove_rmap(page, true);
+			put_page(page);
+		}
+		ret |= VM_FAULT_WRITE;
+	}
+	spin_unlock(vmf->ptl);
+out_mn:
+	/*
+	 * No need to double call mmu_notifier->invalidate_range() callback as
+	 * the above pmdp_huge_clear_flush_notify() did already call it.
+	 */
+	mmu_notifier_invalidate_range_only_end(vma->vm_mm, mmun_start,
+					       mmun_end);
+out:
+	return ret;
+out_unlock:
+	spin_unlock(vmf->ptl);
+	return ret;
+}
+
 #endif /* CONFIG_HAVE_ARCH_TRANSPARENT_HUGEPAGE_PUD */
 
 void huge_pmd_set_accessed(struct vm_fault *vmf, pmd_t orig_pmd)
