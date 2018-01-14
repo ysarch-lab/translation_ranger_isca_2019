@@ -711,6 +711,7 @@ pmd_t *mm_find_pmd(struct mm_struct *mm, unsigned long address)
 	pgd_t *pgd;
 	p4d_t *p4d;
 	pud_t *pud;
+	pud_t pude;
 	pmd_t *pmd = NULL;
 	pmd_t pmde;
 
@@ -723,7 +724,10 @@ pmd_t *mm_find_pmd(struct mm_struct *mm, unsigned long address)
 		goto out;
 
 	pud = pud_offset(p4d, address);
-	if (!pud_present(*pud))
+
+	pude = *pud;
+	barrier();
+	if (!pud_present(pude) || pud_trans_huge(pude))
 		goto out;
 
 	pmd = pmd_offset(pud, address);
