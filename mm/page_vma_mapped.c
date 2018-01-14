@@ -119,8 +119,11 @@ bool page_vma_mapped_walk(struct page_vma_mapped_walk *pvmw)
 	struct page *page = pvmw->page;
 	pgd_t *pgd;
 	p4d_t *p4d;
-	pud_t *pud;
+	pud_t pude;
 	pmd_t pmde;
+
+	if (!pvmw->pte && !pvmw->pmd && pvmw->pud)
+		return not_found(pvmw);
 
 	/* The only possible pmd mapping has been handled on last iteration */
 	if (pvmw->pmd && !pvmw->pte)
@@ -149,10 +152,31 @@ restart:
 	p4d = p4d_offset(pgd, pvmw->address);
 	if (!p4d_present(*p4d))
 		return false;
-	pud = pud_offset(p4d, pvmw->address);
-	if (!pud_present(*pud))
+	pvmw->pud = pud_offset(p4d, pvmw->address);
+
+	/*
+	 * Make sure the pud value isn't cached in a register by the
+	 * compiler and used as a stale value after we've observed a
+	 * subsequent update.
+	 */
+	pude = READ_ONCE(*pvmw->pud);
+	if (pud_trans_huge(pude)) {
+		pvmw->ptl = pud_lock(mm, pvmw->pud);
+		if (likely(pud_trans_huge(*pvmw->pud))) {
+			if (pvmw->flags & PVMW_MIGRATION)
+				return not_found(pvmw);
+			if (pud_page(*pvmw->pud) != page)
+				return not_found(pvmw);
+			return true;
+		} else {
+			/* THP pud was split under us: handle on pmd level */
+			spin_unlock(pvmw->ptl);
+			pvmw->ptl = NULL;
+		}
+	} else if (!pud_present(pude))
 		return false;
-	pvmw->pmd = pmd_offset(pud, pvmw->address);
+
+	pvmw->pmd = pmd_offset(pvmw->pud, pvmw->address);
 	/*
 	 * Make sure the pmd value isn't cached in a register by the
 	 * compiler and used as a stale value after we've observed a
@@ -188,6 +212,7 @@ restart:
 	} else if (!pmd_present(pmde)) {
 		return false;
 	}
+
 	if (!map_pte(pvmw))
 		goto next_pte;
 	while (1) {

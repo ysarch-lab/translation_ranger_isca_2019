@@ -788,9 +788,15 @@ static bool page_referenced_one(struct page *page, struct vm_area_struct *vma,
 					referenced++;
 			}
 		} else if (IS_ENABLED(CONFIG_TRANSPARENT_HUGEPAGE)) {
-			if (pmdp_clear_flush_young_notify(vma, address,
-						pvmw.pmd))
-				referenced++;
+			if (pvmw.pmd) {
+				if (pmdp_clear_flush_young_notify(vma, address,
+							pvmw.pmd))
+					referenced++;
+			} else if (pvmw.pud) {
+				if (pudp_clear_flush_young_notify(vma, address,
+							pvmw.pud))
+					referenced++;
+			}
 		} else {
 			/* unexpected pmd-mapped page? */
 			WARN_ON_ONCE(1);
