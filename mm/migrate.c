@@ -222,7 +222,7 @@ static bool remove_migration_pte(struct page *page, struct vm_area_struct *vma,
 
 #ifdef CONFIG_ARCH_ENABLE_THP_MIGRATION
 		/* PMD-mapped THP migration entry */
-		if (!pvmw.pte) {
+		if (!pvmw.pte && pvmw.pmd) {
 			VM_BUG_ON_PAGE(PageHuge(page) || !PageTransCompound(page), page);
 			remove_migration_pmd(&pvmw, new);
 			continue;
