@@ -171,6 +171,12 @@ void __split_huge_pmd(struct vm_area_struct *vma, pmd_t *pmd,
 void split_huge_pmd_address(struct vm_area_struct *vma, unsigned long address,
 		bool freeze, struct page *page);
 
+bool can_split_huge_pud_page(struct page *page, int *pextra_pins);
+int split_huge_pud_page_to_list(struct page *page, struct list_head *list);
+static inline int split_huge_pud_page(struct page *page)
+{
+	return split_huge_pud_page_to_list(page, NULL);
+}
 void __split_huge_pud(struct vm_area_struct *vma, pud_t *pud,
 		unsigned long address, bool freeze, struct page *page);
 
@@ -310,6 +316,21 @@ static inline void __split_huge_pmd(struct vm_area_struct *vma, pmd_t *pmd,
 static inline void split_huge_pmd_address(struct vm_area_struct *vma,
 		unsigned long address, bool freeze, struct page *page) {}
 
+static inline bool
+can_split_huge_pud_page(struct page *page, int *pextra_pins)
+{
+	BUILD_BUG();
+	return false;
+}
+static inline int
+split_huge_pud_page_to_list(struct page *page, struct list_head *list)
+{
+	return 0;
+}
+static inline int split_huge_pud_page(struct page *page)
+{
+	return 0;
+}
 #define split_huge_pud(__vma, __pmd, __address)	\
 	do { } while (0)
 static inline void split_huge_pud_address(struct vm_area_struct *vma,
