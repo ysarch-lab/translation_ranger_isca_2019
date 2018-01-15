@@ -172,15 +172,19 @@ void split_huge_pmd_address(struct vm_area_struct *vma, unsigned long address,
 		bool freeze, struct page *page);
 
 void __split_huge_pud(struct vm_area_struct *vma, pud_t *pud,
-		unsigned long address);
+		unsigned long address, bool freeze, struct page *page);
 
 #define split_huge_pud(__vma, __pud, __address)				\
 	do {								\
 		pud_t *____pud = (__pud);				\
 		if (pud_trans_huge(*____pud)				\
 					|| pud_devmap(*____pud))	\
-			__split_huge_pud(__vma, __pud, __address);	\
+			__split_huge_pud(__vma, __pud, __address,	\
+						false, NULL);		\
 	}  while (0)
+
+void split_huge_pud_address(struct vm_area_struct *vma, unsigned long address,
+		bool freeze, struct page *page);
 
 extern int hugepage_madvise(struct vm_area_struct *vma,
 			    unsigned long *vm_flags, int advice);
@@ -308,6 +312,8 @@ static inline void split_huge_pmd_address(struct vm_area_struct *vma,
 
 #define split_huge_pud(__vma, __pmd, __address)	\
 	do { } while (0)
+static inline void split_huge_pud_address(struct vm_area_struct *vma,
+		unsigned long address, bool freeze, struct page *page) {}
 
 static inline int hugepage_madvise(struct vm_area_struct *vma,
 				   unsigned long *vm_flags, int advice)

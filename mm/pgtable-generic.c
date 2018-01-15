@@ -218,6 +218,16 @@ pmd_t pmdp_invalidate(struct vm_area_struct *vma, unsigned long address,
 }
 #endif
 
+#ifndef __HAVE_ARCH_PUDP_INVALIDATE
+void pudp_invalidate(struct vm_area_struct *vma, unsigned long address,
+		     pud_t *pudp)
+{
+	pud_t entry = *pudp;
+	set_pud_at(vma->vm_mm, address, pudp, pud_mknotpresent(entry));
+	flush_pud_tlb_range(vma, address, address + HPAGE_PUD_SIZE);
+}
+#endif
+
 #ifndef pmdp_collapse_flush
 pmd_t pmdp_collapse_flush(struct vm_area_struct *vma, unsigned long address,
 			  pmd_t *pmdp)
