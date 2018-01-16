@@ -137,6 +137,51 @@ static inline void pmd_free(struct mm_struct *mm, pmd_t *pmd)
 	free_page((unsigned long)pmd);
 }
 
+static inline pmd_t *pmd_alloc_one_page_with_ptes(struct mm_struct *mm, unsigned long addr)
+{
+	pgtable_t pte_pgtables;
+	pmd_t *pmd;
+	spinlock_t *pmd_ptl;
+	int i;
+
+	pte_pgtables = pte_alloc_order(mm, addr,
+		HPAGE_PUD_ORDER - HPAGE_PMD_ORDER);
+	if (!pte_pgtables)
+		return NULL;
+
+	pmd = pmd_alloc_one(mm, addr);
+	if (unlikely(!pmd)) {
+		pte_free_order(mm, pte_pgtables,
+			HPAGE_PUD_ORDER - HPAGE_PMD_ORDER);
+		return NULL;
+	}
+	pmd_ptl = pmd_lock(mm, pmd);
+
+	for (i = 0; i < (1<<(HPAGE_PUD_ORDER - HPAGE_PMD_ORDER)); i++)
+		pgtable_trans_huge_deposit(mm, pmd, pte_pgtables + i);
+
+	spin_unlock(pmd_ptl);
+
+	return pmd;
+}
+
+static inline void pmd_free_page_with_ptes(struct mm_struct *mm, pmd_t *pmd)
+{
+	spinlock_t *pmd_ptl;
+	int i;
+
+	BUG_ON((unsigned long)pmd & (PAGE_SIZE-1));
+	pmd_ptl = pmd_lock(mm, pmd);
+
+	for (i = 0; i < (1<<(HPAGE_PUD_ORDER - HPAGE_PMD_ORDER)); i++) {
+		pgtable_t pte_pgtable;
+		pte_pgtable = pgtable_trans_huge_withdraw(mm, pmd);
+		pte_free(mm, pte_pgtable);
+	}
+
+	spin_unlock(pmd_ptl);
+	pmd_free(mm, pmd);
+}
 extern void ___pmd_free_tlb(struct mmu_gather *tlb, pmd_t *pmd);
 
 static inline void __pmd_free_tlb(struct mmu_gather *tlb, pmd_t *pmd,
