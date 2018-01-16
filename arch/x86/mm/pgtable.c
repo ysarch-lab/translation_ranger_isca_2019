@@ -49,7 +49,6 @@ pgtable_t pte_alloc_order(struct mm_struct *mm, unsigned long address, int order
 	for (i = 0; i < (1<<order); i++) {
 		if (!pgtable_page_ctor(&pte[i])) {
 			__free_page(&pte[i]);
-			i -= 1;
 			while (--i >= 0) {
 				pgtable_page_dtor(&pte[i]);
 				__free_page(&pte[i]);
