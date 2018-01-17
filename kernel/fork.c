@@ -592,6 +592,10 @@ static void check_mm(struct mm_struct *mm)
 #if defined(CONFIG_TRANSPARENT_HUGEPAGE) && !USE_SPLIT_PMD_PTLOCKS
 	VM_BUG_ON_MM(mm->pmd_huge_pte, mm);
 #endif
+	VM_BUG_ON_MM(!list_empty(&mm->pud_huge_pte) &&
+				 !pagechain_empty(list_first_entry(&mm->pud_huge_pte, 
+					struct pagechain, list)),
+				mm);
 }
 
 #define allocate_mm()	(kmem_cache_alloc(mm_cachep, GFP_KERNEL))
@@ -918,7 +922,7 @@ static struct mm_struct *mm_init(struct mm_struct *mm, struct task_struct *p,
 #if defined(CONFIG_TRANSPARENT_HUGEPAGE) && !USE_SPLIT_PMD_PTLOCKS
 	mm->pmd_huge_pte = NULL;
 #endif
-	mm->pud_huge_pte = NULL;
+	INIT_LIST_HEAD(&mm->pud_huge_pte);
 	mm_init_uprobes_state(mm);
 
 	if (current->mm) {

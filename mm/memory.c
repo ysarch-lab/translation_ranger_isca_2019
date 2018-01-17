@@ -4744,3 +4744,29 @@ void ptlock_free(struct page *page)
 	kmem_cache_free(page_ptl_cachep, page->ptl);
 }
 #endif
+
+static struct kmem_cache *pagechain_cachep;
+
+void __init pagechain_cache_init(void)
+{
+	pagechain_cachep = kmem_cache_create("pagechain", sizeof(struct pagechain), 0,
+			SLAB_PANIC, NULL);
+}
+
+struct pagechain *pagechain_alloc(void)
+{
+	struct pagechain *chain;
+
+	chain = kmem_cache_alloc(pagechain_cachep, GFP_ATOMIC);
+
+	if (!chain)
+		return NULL;
+
+	pagechain_init(chain);
+	return chain;
+}
+
+void pagechain_free(struct pagechain *pchain)
+{
+	kmem_cache_free(pagechain_cachep, pchain);
+}

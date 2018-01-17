@@ -25,6 +25,7 @@
 #include <linux/err.h>
 #include <linux/page_ref.h>
 #include <linux/memremap.h>
+#include <linux/pagechain.h>
 
 struct mempolicy;
 struct anon_vma;
@@ -1830,6 +1831,7 @@ static inline void pgtable_init(void)
 {
 	ptlock_cache_init();
 	pgtable_cache_init();
+	pagechain_cache_init();
 }
 
 static inline bool pgtable_page_ctor(struct page *page)

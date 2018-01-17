@@ -468,7 +468,7 @@ struct mm_struct {
 #if defined(CONFIG_TRANSPARENT_HUGEPAGE) && !USE_SPLIT_PMD_PTLOCKS
 	pgtable_t pmd_huge_pte; /* protected by page_table_lock */
 #endif
-	pgtable_t pud_huge_pte; /* protected by page_table_lock */
+	struct list_head pud_huge_pte; /* protected by page_table_lock */
 #ifdef CONFIG_CPUMASK_OFFSTACK
 	struct cpumask cpumask_allocation;
 #endif

@@ -8,6 +8,7 @@
  */
 
 #include <linux/pagemap.h>
+#include <linux/pagechain.h>
 #include <asm/tlb.h>
 #include <asm-generic/pgtable.h>
 
@@ -164,14 +165,18 @@ void pgtable_trans_huge_deposit(struct mm_struct *mm, pmd_t *pmdp,
 void pgtable_trans_huge_pud_deposit(struct mm_struct *mm, pud_t *pudp,
 				pgtable_t pgtable)
 {
+	struct pagechain *chain = NULL;
 	assert_spin_locked(pud_lockptr(mm, pudp));
 
 	/* FIFO */
-	if (!pud_huge_pte(mm, pudp))
-		INIT_LIST_HEAD(&pgtable->lru);
-	else
-		list_add(&pgtable->lru, &pud_huge_pte(mm, pudp)->lru);
-	pud_huge_pte(mm, pudp) = pgtable;
+	chain = list_first_entry_or_null(&pud_huge_pte(mm, pudp),
+			struct pagechain, list);
+
+	if (!chain || !pagechain_space(chain)) {
+		chain = pagechain_alloc();
+		list_add(&chain->list, &pud_huge_pte(mm, pudp));
+	}
+	pagechain_deposit(chain, pgtable);
 }
 #endif
 
@@ -196,15 +201,27 @@ pgtable_t pgtable_trans_huge_withdraw(struct mm_struct *mm, pmd_t *pmdp)
 pgtable_t pgtable_trans_huge_pud_withdraw(struct mm_struct *mm, pud_t *pudp)
 {
 	pgtable_t pgtable;
+	struct pagechain *chain = NULL;
 
 	assert_spin_locked(pud_lockptr(mm, pudp));
 
 	/* FIFO */
-	pgtable = pud_huge_pte(mm, pudp);
-	pud_huge_pte(mm, pudp) = list_first_entry_or_null(&pgtable->lru,
-							  struct page, lru);
-	if (pud_huge_pte(mm, pudp))
-		list_del(&pgtable->lru);
+retry:
+	chain = list_first_entry_or_null(&pud_huge_pte(mm, pudp),
+			struct pagechain, list);
+
+	if (!chain)
+		return NULL;
+
+	if (pagechain_empty(chain)) {
+		if (list_is_singular(&chain->list))
+			return NULL;
+		list_del(&chain->list);
+		pagechain_free(chain);
+		goto retry;
+	}
+
+	pgtable = pagechain_withdraw(chain);
 	return pgtable;
 }
 #endif

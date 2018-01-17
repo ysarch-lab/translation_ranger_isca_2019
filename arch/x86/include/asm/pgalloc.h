@@ -162,6 +162,7 @@ static inline pmd_t *pmd_alloc_one_page_with_ptes(struct mm_struct *mm, unsigned
 
 	spin_unlock(pmd_ptl);
 
+	pr_debug("%s: pmd: %p\n", __func__, pmd);
 	return pmd;
 }
 
@@ -170,6 +171,7 @@ static inline void pmd_free_page_with_ptes(struct mm_struct *mm, pmd_t *pmd)
 	spinlock_t *pmd_ptl;
 	int i;
 
+	pr_debug("%s: pmd: %p\n", __func__, pmd);
 	BUG_ON((unsigned long)pmd & (PAGE_SIZE-1));
 	pmd_ptl = pmd_lock(mm, pmd);
 
