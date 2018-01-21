@@ -1061,7 +1061,7 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 					goto keep_locked;
 				if (PageTransHuge(page)) {
 split_again:
-					if (compound_order(page) == HPAGE_PMD_NR) {
+					if (compound_order(page) == HPAGE_PMD_ORDER) {
 						/* cannot split THP, skip it */
 						if (!can_split_huge_page(page, NULL))
 							goto activate_locked;
@@ -1075,7 +1075,7 @@ split_again:
 										page_list))
 							goto activate_locked;
 					}
-					if (compound_order(page) == HPAGE_PUD_NR) {
+					if (compound_order(page) == HPAGE_PUD_ORDER) {
 						/* cannot split THP, skip it */
 						if (!can_split_huge_pud_page(page, NULL))
 							goto activate_locked;
@@ -1088,6 +1088,7 @@ split_again:
 							split_huge_pud_page_to_list(page,
 										page_list))
 							goto activate_locked;
+						VM_BUG_ON(compound_order(page) == HPAGE_PUD_ORDER);
 						goto split_again;
 					}
 				}
@@ -1111,6 +1112,7 @@ split_again:
 				mapping = page_mapping(page);
 			}
 		} else if (unlikely(PageTransHuge(page))) {
+			VM_BUG_ON_PAGE(compound_order(page) != HPAGE_PMD_ORDER, page);
 			/* Split file THP */
 			if (split_huge_page_to_list(page, page_list))
 				goto keep_locked;
@@ -1123,8 +1125,12 @@ split_again:
 		if (page_mapped(page)) {
 			enum ttu_flags flags = ttu_flags | TTU_BATCH_FLUSH;
 
-			if (unlikely(PageTransHuge(page)))
-				flags |= TTU_SPLIT_HUGE_PMD;
+			if (unlikely(PageTransHuge(page))) {
+				if (compound_order(page) == HPAGE_PMD_ORDER)
+					flags |= TTU_SPLIT_HUGE_PMD;
+				else if (compound_order(page) == HPAGE_PUD_ORDER)
+					flags |= TTU_SPLIT_HUGE_PUD;
+			}
 			if (!try_to_unmap(page, flags)) {
 				nr_unmap_fail++;
 				goto activate_locked;
