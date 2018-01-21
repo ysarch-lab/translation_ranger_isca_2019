@@ -1334,7 +1334,7 @@ void page_remove_rmap(struct page *page, bool compound)
 	if (unlikely(PageMlocked(page)))
 		clear_page_mlock(page);
 
-	if (PageTransCompound(page) && hpage_nr_pages(page) == HPAGE_PMD_NR)
+	if (PageTransCompound(page))
 		deferred_split_huge_page(compound_head(page));
 
 	/*
