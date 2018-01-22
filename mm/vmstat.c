@@ -1260,6 +1260,10 @@ const char * const vmstat_text[] = {
 	"thp_fault_alloc_pud",
 	"thp_fault_fallback_pud",
 	"thp_split_pud",
+	"thp_split_pud_page",
+	"thp_split_pud_page_failed",
+	"thp_zero_pud_page_alloc",
+	"thp_zero_pud_page_alloc_failed",
 #endif
 	"thp_zero_page_alloc",
 	"thp_zero_page_alloc_failed",

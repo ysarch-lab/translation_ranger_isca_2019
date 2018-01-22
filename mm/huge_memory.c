@@ -111,10 +111,10 @@ retry:
 	zero_page = alloc_pages((GFP_TRANSHUGE | __GFP_ZERO) & ~__GFP_MOVABLE,
 			HPAGE_PUD_ORDER);
 	if (!zero_page) {
-		count_vm_event(THP_ZERO_PAGE_ALLOC_FAILED);
+		count_vm_event(THP_ZERO_PUD_PAGE_ALLOC_FAILED);
 		return NULL;
 	}
-	count_vm_event(THP_ZERO_PAGE_ALLOC);
+	count_vm_event(THP_ZERO_PUD_PAGE_ALLOC);
 	preempt_disable();
 	if (cmpxchg(&huge_pud_zero_page, NULL, zero_page)) {
 		preempt_enable();
@@ -3215,7 +3215,7 @@ out_unlock:
 	if (mapping)
 		i_mmap_unlock_read(mapping);
 out:
-	count_vm_event(!ret ? THP_SPLIT_PAGE : THP_SPLIT_PAGE_FAILED);
+	count_vm_event(!ret ? THP_SPLIT_PUD_PAGE : THP_SPLIT_PUD_PAGE_FAILED);
 	return ret;
 }
 #endif /* CONFIG_HAVE_ARCH_TRANSPARENT_HUGEPAGE_PUD */
