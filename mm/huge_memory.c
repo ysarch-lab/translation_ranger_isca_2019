@@ -197,6 +197,32 @@ static struct shrinker huge_zero_page_shrinker = {
 	.seeks = DEFAULT_SEEKS,
 };
 
+static unsigned long shrink_huge_pud_zero_page_count(struct shrinker *shrink,
+					struct shrink_control *sc)
+{
+	/* we can free zero page only if last reference remains */
+	return atomic_read(&huge_pud_zero_refcount) == 1 ? HPAGE_PUD_NR : 0;
+}
+
+static unsigned long shrink_huge_pud_zero_page_scan(struct shrinker *shrink,
+				       struct shrink_control *sc)
+{
+	if (atomic_cmpxchg(&huge_pud_zero_refcount, 1, 0) == 1) {
+		struct page *zero_page = xchg(&huge_pud_zero_page, NULL);
+		BUG_ON(zero_page == NULL);
+		__free_pages(zero_page, compound_order(zero_page));
+		return HPAGE_PUD_NR;
+	}
+
+	return 0;
+}
+
+static struct shrinker huge_pud_zero_page_shrinker = {
+	.count_objects = shrink_huge_pud_zero_page_count,
+	.scan_objects = shrink_huge_pud_zero_page_scan,
+	.seeks = DEFAULT_SEEKS,
+};
+
 #ifdef CONFIG_SYSFS
 static ssize_t enabled_show(struct kobject *kobj,
 			    struct kobj_attribute *attr, char *buf)
@@ -464,6 +490,9 @@ static int __init hugepage_init(void)
 	err = register_shrinker(&huge_zero_page_shrinker);
 	if (err)
 		goto err_hzp_shrinker;
+	err = register_shrinker(&huge_pud_zero_page_shrinker);
+	if (err)
+		goto err_hpzp_shrinker;
 	err = register_shrinker(&deferred_split_shrinker);
 	if (err)
 		goto err_split_shrinker;
@@ -486,6 +515,8 @@ static int __init hugepage_init(void)
 err_khugepaged:
 	unregister_shrinker(&deferred_split_shrinker);
 err_split_shrinker:
+	unregister_shrinker(&huge_pud_zero_page_shrinker);
+err_hpzp_shrinker:
 	unregister_shrinker(&huge_zero_page_shrinker);
 err_hzp_shrinker:
 	khugepaged_destroy();
