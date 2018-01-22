@@ -1060,7 +1060,20 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 				if (!(sc->gfp_mask & __GFP_IO))
 					goto keep_locked;
 				if (PageTransHuge(page)) {
-split_again:
+					if (compound_order(page) == HPAGE_PUD_ORDER) {
+						/* cannot split THP, skip it */
+						if (!can_split_huge_pud_page(page, NULL))
+							goto activate_locked;
+						/*
+						 * Split pages without a PMD map right
+						 * away. Chances are some or all of the
+						 * tail pages can be freed without IO.
+						 */
+						if (!compound_mapcount(page) &&
+							split_huge_pud_page_to_list(page,
+										page_list))
+							goto activate_locked;
+					}
 					if (compound_order(page) == HPAGE_PMD_ORDER) {
 						/* cannot split THP, skip it */
 						if (!can_split_huge_page(page, NULL))
@@ -1075,30 +1088,21 @@ split_again:
 										page_list))
 							goto activate_locked;
 					}
-					if (compound_order(page) == HPAGE_PUD_ORDER) {
-						/* cannot split THP, skip it */
-						if (!can_split_huge_pud_page(page, NULL))
-							goto activate_locked;
-						/*
-						 * Split pages without a PMD map right
-						 * away. Chances are some or all of the
-						 * tail pages can be freed without IO.
-						 */
-						if (!compound_mapcount(page) &&
-							split_huge_pud_page_to_list(page,
-										page_list))
-							goto activate_locked;
-						VM_BUG_ON(compound_order(page) == HPAGE_PUD_ORDER);
-						goto split_again;
-					}
 				}
 				if (!add_to_swap(page)) {
 					if (!PageTransHuge(page))
 						goto activate_locked;
 					/* Fallback to swap normal pages */
-					if (split_huge_page_to_list(page,
-								    page_list))
-						goto activate_locked;
+					if (compound_order(page) == HPAGE_PUD_ORDER) {
+						if (split_huge_pud_page_to_list(page,
+										page_list))
+							goto activate_locked;
+					}
+					if (compound_order(page) == HPAGE_PMD_ORDER) {
+						if (split_huge_page_to_list(page,
+										page_list))
+							goto activate_locked;
+					}
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
 					count_vm_event(THP_SWPOUT_FALLBACK);
 #endif
