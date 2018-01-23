@@ -45,6 +45,8 @@ pgtable_t pte_alloc_order(struct mm_struct *mm, unsigned long address, int order
 	if (!pte)
 		return NULL;
 	split_page(pte, order);
+	for (i = 1; i < (1 << order); i++)
+		set_page_private(pte + i, 0);
 
 	for (i = 0; i < (1<<order); i++) {
 		if (!pgtable_page_ctor(&pte[i])) {
