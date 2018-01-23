@@ -2806,7 +2806,8 @@ static void __split_huge_pud_locked(struct vm_area_struct *vma, pud_t *pud,
 		pmd = pmd_offset(&_pud, addr);
 		BUG_ON(!pmd_none(*pmd));
 		set_pmd_at(mm, addr, pmd, entry);
-		atomic_inc(compound_mapcount_ptr(&page[i]));
+		/* distinguish between pud compound_mapcount and pmd compound_mapcount */
+		atomic_inc(sub_compound_mapcount_ptr(&page[i]));
 		__inc_node_page_state(&page[i], NR_ANON_THPS);
 	}
 
@@ -2816,7 +2817,8 @@ static void __split_huge_pud_locked(struct vm_area_struct *vma, pud_t *pud,
 	 */
 	if (compound_mapcount(page) > 1 && !TestSetPageDoubleMap(page)) {
 		for (i = 0; i < HPAGE_PUD_NR; i += HPAGE_PMD_NR)
-			atomic_inc(compound_mapcount_ptr(&page[i]));
+		/* distinguish between pud compound_mapcount and pmd compound_mapcount */
+			atomic_inc(sub_compound_mapcount_ptr(&page[i]));
 	}
 
 	if (atomic_add_negative(-1, compound_mapcount_ptr(page))) {
@@ -2825,7 +2827,8 @@ static void __split_huge_pud_locked(struct vm_area_struct *vma, pud_t *pud,
 		if (TestClearPageDoubleMap(page)) {
 			/* No need in mapcount reference anymore */
 			for (i = 0; i < HPAGE_PUD_NR; i += HPAGE_PMD_NR)
-				atomic_dec(compound_mapcount_ptr(&page[i]));
+		/* distinguish between pud compound_mapcount and pmd compound_mapcount */
+				atomic_dec(sub_compound_mapcount_ptr(&page[i]));
 		}
 	}
 
@@ -2856,7 +2859,8 @@ static void __split_huge_pud_locked(struct vm_area_struct *vma, pud_t *pud,
 
 	if (freeze) {
 		for (i = 0; i < HPAGE_PUD_NR; i += HPAGE_PMD_NR) {
-			page_remove_rmap(page + i, true);
+			/*page_remove_rmap(page + i, true);*/
+			atomic_dec(sub_compound_mapcount_ptr(&page[i]));
 			put_page(page + i);
 		}
 	}
@@ -2951,12 +2955,18 @@ static void __split_huge_pud_page_tail(struct page *head, int tail,
 		struct lruvec *lruvec, struct list_head *list)
 {
 	struct page *page_tail = head + tail;
+	int page_tail_mapcount = sub_compound_mapcount(page_tail);
 
-	VM_BUG_ON_PAGE(atomic_read(&page_tail->_mapcount) != -1, page_tail);
 	VM_BUG_ON_PAGE(page_ref_count(page_tail) != 0, page_tail);
 
+	atomic_set(sub_compound_mapcount_ptr(page_tail), -1);
+
+	clear_compound_head(page_tail);
 	prep_compound_page(page_tail, HPAGE_PMD_ORDER);
 	prep_transhuge_page(page_tail);
+
+	/* move sub PMD page mapcount */
+	atomic_set(compound_mapcount_ptr(page_tail), page_tail_mapcount);
 	/*
 	 * tail_page->_refcount is zero and not changing from under us. But
 	 * get_page_unless_zero() may be running from under us on the
@@ -2986,7 +2996,9 @@ static void __split_huge_pud_page_tail(struct page *head, int tail,
 			 (1L << PG_active) |
 			 (1L << PG_locked) |
 			 (1L << PG_unevictable) |
-			 (1L << PG_dirty)));
+			 (1L << PG_dirty) |
+			 /* preserve THP */
+			 (1L << PG_head)));
 
 	/*
 	 * After clearing PageTail the gup refcount can be released.
@@ -3006,7 +3018,7 @@ static void __split_huge_pud_page_tail(struct page *head, int tail,
 
 	page_tail->index = head->index + tail;
 	page_cpupid_xchg_last(page_tail, page_cpupid_last(head));
-	lru_add_page_tail(head, page_tail, lruvec, list);
+	lru_add_pud_page_tail(head, page_tail, lruvec, list);
 }
 
 static void __split_huge_pud_page(struct page *page, struct list_head *list,
@@ -3730,13 +3742,22 @@ int total_mapcount(struct page *page)
 	if (PageHuge(page))
 		return compound;
 	ret = compound;
-	for (i = 0; i < hpage_nr_pages(page); i++)
-		ret += atomic_read(&page[i]._mapcount) + 1;
+	/* if PMD, read all base page, if PUD, read the sub_compound_mapcount()*/
+	if (compound_order(page) == HPAGE_PMD_ORDER) {
+		for (i = 0; i < hpage_nr_pages(page); i++)
+			ret += atomic_read(&page[i]._mapcount) + 1;
+	} else if (compound_order(page) == HPAGE_PUD_ORDER) {
+		for (i = 0; i < HPAGE_PUD_NR; i += HPAGE_PMD_NR)
+			ret += sub_compound_mapcount(&page[i]);
+	} else
+		VM_BUG_ON_PAGE(1, page);
 	/* File pages has compound_mapcount included in _mapcount */
+	/* both PUD and PMD has HPAGE_PMD_NR sub pages */
 	if (!PageAnon(page))
 		return ret - compound * HPAGE_PMD_NR;
+	/* both PUD and PMD has HPAGE_PMD_NR sub pages */
 	if (PageDoubleMap(page))
-		ret -= hpage_nr_pages(page);
+		ret -= HPAGE_PMD_NR;
 	return ret;
 }
 
@@ -3781,14 +3802,25 @@ int page_trans_huge_mapcount(struct page *page, int *total_mapcount)
 	page = compound_head(page);
 
 	_total_mapcount = ret = 0;
-	for (i = 0; i < hpage_nr_pages(page); i++) {
-		mapcount = atomic_read(&page[i]._mapcount) + 1;
-		ret = max(ret, mapcount);
-		_total_mapcount += mapcount;
-	}
+	/* if PMD, read all base page, if PUD, read the sub_compound_mapcount()*/
+	if (compound_order(page) == HPAGE_PMD_ORDER) {
+		for (i = 0; i < hpage_nr_pages(page); i++) {
+			mapcount = atomic_read(&page[i]._mapcount) + 1;
+			ret = max(ret, mapcount);
+			_total_mapcount += mapcount;
+		}
+	} else if (compound_order(page) == HPAGE_PUD_ORDER) {
+		for (i = 0; i < HPAGE_PUD_NR; i += HPAGE_PMD_NR) {
+			mapcount = sub_compound_mapcount(&page[i]);
+			ret = max(ret, mapcount);
+			_total_mapcount += mapcount;
+		}
+	} else
+		VM_BUG_ON_PAGE(1, page);
 	if (PageDoubleMap(page)) {
 		ret -= 1;
-		_total_mapcount -= hpage_nr_pages(page);
+		/* both PUD and PMD has HPAGE_PMD_NR sub pages */
+		_total_mapcount -= HPAGE_PMD_NR;
 	}
 	mapcount = compound_mapcount(page);
 	ret += mapcount;

@@ -579,6 +579,22 @@ static inline int compound_mapcount(struct page *page)
 	return atomic_read(compound_mapcount_ptr(page)) + 1;
 }
 
+static inline unsigned int compound_order(struct page *page);
+static inline atomic_t *sub_compound_mapcount_ptr(struct page *page)
+{
+	struct page *head = compound_head(page);
+	VM_BUG_ON_PAGE(!PageCompound(page), page);
+	VM_BUG_ON_PAGE(compound_order(head) != HPAGE_PUD_ORDER, page);
+	VM_BUG_ON_PAGE((page - head) % HPAGE_PMD_NR, page);
+	return &page[1]._mapcount;
+}
+
+/* Only works for PUD pages */
+static inline int sub_compound_mapcount(struct page *page)
+{
+	return atomic_read(sub_compound_mapcount_ptr(page)) + 1;
+}
+
 /*
  * The atomic page->_mapcount, starts from -1: so that transitions
  * both from it and to it can be tracked, using atomic_inc_and_test
