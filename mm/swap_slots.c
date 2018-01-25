@@ -317,6 +317,8 @@ swp_entry_t get_swap_page(struct page *page)
 	entry.val = 0;
 
 	if (PageTransHuge(page)) {
+		if (compound_order(page) == HPAGE_PUD_ORDER)
+			return entry;
 		if (IS_ENABLED(CONFIG_THP_SWAP))
 			get_swap_pages(1, true, &entry);
 		return entry;
