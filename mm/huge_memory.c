@@ -2861,6 +2861,8 @@ static void __split_huge_pud_locked(struct vm_area_struct *vma, pud_t *pud,
 		for (i = 0; i < HPAGE_PUD_NR; i += HPAGE_PMD_NR) {
 			/*page_remove_rmap(page + i, true);*/
 			atomic_dec(sub_compound_mapcount_ptr(&page[i]));
+			__dec_node_page_state(page, NR_ANON_THPS);
+			__mod_node_page_state(page_pgdat(page), NR_ANON_MAPPED, -HPAGE_PMD_NR);
 			put_page(page + i);
 		}
 	}
@@ -2955,7 +2957,7 @@ static void __split_huge_pud_page_tail(struct page *head, int tail,
 		struct lruvec *lruvec, struct list_head *list)
 {
 	struct page *page_tail = head + tail;
-	int page_tail_mapcount = sub_compound_mapcount(page_tail);
+	/*int page_tail_mapcount = sub_compound_mapcount(page_tail);*/
 
 	VM_BUG_ON_PAGE(page_ref_count(page_tail) != 0, page_tail);
 
@@ -2966,7 +2968,7 @@ static void __split_huge_pud_page_tail(struct page *head, int tail,
 	prep_transhuge_page(page_tail);
 
 	/* move sub PMD page mapcount */
-	atomic_set(compound_mapcount_ptr(page_tail), page_tail_mapcount);
+	/*atomic_set(compound_mapcount_ptr(page_tail), page_tail_mapcount);*/
 	/*
 	 * tail_page->_refcount is zero and not changing from under us. But
 	 * get_page_unless_zero() may be running from under us on the
@@ -3226,6 +3228,7 @@ int split_huge_pud_page_to_list(struct page *page, struct list_head *list)
 		__split_huge_pud_page(page, list, flags);
 		if (PageSwapCache(head)) {
 			swp_entry_t entry = { .val = page_private(head) };
+			VM_BUG_ON(1);
 
 			ret = split_swap_cluster(entry);
 		} else
@@ -4061,8 +4064,14 @@ static unsigned long deferred_split_scan(struct shrinker *shrink,
 		if (!trylock_page(page))
 			goto next;
 		/* split_huge_page() removes page from list on success */
-		if (!split_huge_page(page))
-			split++;
+		if (compound_order(page) == HPAGE_PUD_ORDER) {
+			if (!split_huge_pud_page(page))
+				split++;
+		} else if (compound_order(page) == HPAGE_PMD_ORDER) {
+			if (!split_huge_page(page))
+				split++;
+		} else
+			VM_BUG_ON_PAGE(1, page);
 		unlock_page(page);
 next:
 		put_page(page);
