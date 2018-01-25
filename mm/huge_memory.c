@@ -1665,13 +1665,13 @@ alloc:
 		prep_transhuge_page(new_page);
 	} else {
 		if (!page) {
-			WARN(1, "%s: split_huge_page\n", __func__);
+			/*WARN(1, "%s: split_huge_page\n", __func__);*/
 			split_huge_pud(vma, vmf->pud, vmf->address);
 			ret |= VM_FAULT_FALLBACK;
 		} else {
 			ret = do_huge_pud_wp_page_fallback(vmf, orig_pud, page);
 			if (ret & VM_FAULT_OOM) {
-				WARN(1, "%s: split_huge_page after wp fallback\n", __func__);
+				/*WARN(1, "%s: split_huge_page after wp fallback\n", __func__);*/
 				split_huge_pud(vma, vmf->pud, vmf->address);
 				ret |= VM_FAULT_FALLBACK;
 			}
@@ -1684,7 +1684,7 @@ alloc:
 	if (unlikely(mem_cgroup_try_charge(new_page, vma->vm_mm,
 					huge_gfp, &memcg, true))) {
 		put_page(new_page);
-		WARN(1, "%s: split_huge_page after mem cgroup failed\n", __func__);
+		/*WARN(1, "%s: split_huge_page after mem cgroup failed\n", __func__);*/
 		split_huge_pud(vma, vmf->pud, vmf->address);
 		if (page)
 			put_page(page);
