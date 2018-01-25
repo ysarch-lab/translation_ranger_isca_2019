@@ -1266,10 +1266,22 @@ out:
 
 static void page_remove_anon_compound_rmap(struct page *page)
 {
-	int i, nr;
+	int i, nr = 0;
+	struct page *head = compound_head(page);
 
-	if (!atomic_add_negative(-1, compound_mapcount_ptr(page)))
-		return;
+	if (compound_order(head) == HPAGE_PUD_ORDER) {
+		if (head != page) {
+			if (!atomic_add_negative(-1, sub_compound_mapcount_ptr(page)))
+				return;
+		} else {
+			if (!atomic_add_negative(-1, compound_mapcount_ptr(page)))
+				return;
+		}
+	} else if (compound_order(head) == HPAGE_PMD_ORDER) {
+		if (!atomic_add_negative(-1, compound_mapcount_ptr(page)))
+			return;
+	} else
+		VM_BUG_ON_PAGE(1, page);
 
 	/* Hugepages are not counted in NR_ANON_PAGES for now. */
 	if (unlikely(PageHuge(page)))
@@ -1278,30 +1290,42 @@ static void page_remove_anon_compound_rmap(struct page *page)
 	if (!IS_ENABLED(CONFIG_TRANSPARENT_HUGEPAGE))
 		return;
 
-	if (hpage_nr_pages(page) == HPAGE_PMD_NR)
+	if (hpage_nr_pages(head) == HPAGE_PMD_NR)
 		__dec_node_page_state(page, NR_ANON_THPS);
 	else
 		__dec_node_page_state(page, NR_ANON_THPS_PUD);
 
-	if (TestClearPageDoubleMap(page)) {
-		/*
-		 * Subpages can be mapped with PTEs too. Check how many of
-		 * themi are still mapped.
-		 */
-		for (i = 0, nr = 0; i < hpage_nr_pages(page); i++) {
-			if (atomic_add_negative(-1, &page[i]._mapcount))
-				nr++;
-		}
+	if (TestClearPageDoubleMap(head)) {
+		if (compound_order(head) == HPAGE_PUD_ORDER) {
+			/*
+			 * Subpages can be mapped with PMDs too. Check how many of
+			 * themi are still mapped.
+			 */
+			for (i = 0, nr = 0; i < HPAGE_PUD_NR; i += HPAGE_PMD_NR) {
+				if (atomic_add_negative(-1, sub_compound_mapcount_ptr(&head[i])))
+					nr++;
+			}
+		} else if (compound_order(head) == HPAGE_PMD_ORDER) {
+			/*
+			 * Subpages can be mapped with PTEs too. Check how many of
+			 * themi are still mapped.
+			 */
+			for (i = 0, nr = 0; i < hpage_nr_pages(head); i++) {
+				if (atomic_add_negative(-1, &head[i]._mapcount))
+					nr++;
+			}
+		} else
+			VM_BUG_ON_PAGE(1, page);
 	} else {
-		nr = hpage_nr_pages(page);
+		nr = hpage_nr_pages(head);
 	}
 
 	if (unlikely(PageMlocked(page)))
 		clear_page_mlock(page);
 
 	if (nr) {
-		__mod_node_page_state(page_pgdat(page), NR_ANON_MAPPED, -nr);
-		deferred_split_huge_page(page);
+		__mod_node_page_state(page_pgdat(head), NR_ANON_MAPPED, -nr);
+		deferred_split_huge_page(head);
 	}
 }
 
