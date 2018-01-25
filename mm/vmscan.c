@@ -1089,20 +1089,19 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 							goto activate_locked;
 					}
 				}
+				if (compound_order(page) == HPAGE_PUD_ORDER) {
+					if (split_huge_pud_page_to_list(page,
+									page_list))
+						goto activate_locked;
+				}
 				if (!add_to_swap(page)) {
 					if (!PageTransHuge(page))
 						goto activate_locked;
 					/* Fallback to swap normal pages */
-					if (compound_order(page) == HPAGE_PUD_ORDER) {
-						if (split_huge_pud_page_to_list(page,
-										page_list))
-							goto activate_locked;
-					}
-					if (compound_order(page) == HPAGE_PMD_ORDER) {
-						if (split_huge_page_to_list(page,
-										page_list))
-							goto activate_locked;
-					}
+					VM_BUG_ON_PAGE(compound_order(page) != HPAGE_PMD_ORDER, page);
+					if (split_huge_page_to_list(page,
+									page_list))
+						goto activate_locked;
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
 					count_vm_event(THP_SWPOUT_FALLBACK);
 #endif
