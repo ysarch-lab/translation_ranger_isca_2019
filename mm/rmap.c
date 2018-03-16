@@ -1271,7 +1271,7 @@ static void page_remove_anon_compound_rmap(struct page *page)
 
 	if (compound_order(head) == HPAGE_PUD_ORDER) {
 		if (head != page) {
-			if (!atomic_add_negative(-1, sub_compound_mapcount_ptr(page)))
+			if (!atomic_add_negative(-1, sub_compound_mapcount_ptr(page, 1)))
 				return;
 		} else {
 			if (!atomic_add_negative(-1, compound_mapcount_ptr(page)))
@@ -1302,7 +1302,7 @@ static void page_remove_anon_compound_rmap(struct page *page)
 			 * themi are still mapped.
 			 */
 			for (i = 0, nr = 0; i < HPAGE_PUD_NR; i += HPAGE_PMD_NR) {
-				if (atomic_add_negative(-1, sub_compound_mapcount_ptr(&head[i])))
+				if (atomic_add_negative(-1, sub_compound_mapcount_ptr(&head[i], 1)))
 					nr++;
 			}
 		} else if (compound_order(head) == HPAGE_PMD_ORDER) {

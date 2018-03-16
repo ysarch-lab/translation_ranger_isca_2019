@@ -2807,7 +2807,7 @@ static void __split_huge_pud_locked(struct vm_area_struct *vma, pud_t *pud,
 		BUG_ON(!pmd_none(*pmd));
 		set_pmd_at(mm, addr, pmd, entry);
 		/* distinguish between pud compound_mapcount and pmd compound_mapcount */
-		atomic_inc(sub_compound_mapcount_ptr(&page[i]));
+		atomic_inc(sub_compound_mapcount_ptr(&page[i], 1));
 		__inc_node_page_state(&page[i], NR_ANON_THPS);
 	}
 
@@ -2818,7 +2818,7 @@ static void __split_huge_pud_locked(struct vm_area_struct *vma, pud_t *pud,
 	if (compound_mapcount(page) > 1 && !TestSetPageDoubleMap(page)) {
 		for (i = 0; i < HPAGE_PUD_NR; i += HPAGE_PMD_NR)
 		/* distinguish between pud compound_mapcount and pmd compound_mapcount */
-			atomic_inc(sub_compound_mapcount_ptr(&page[i]));
+			atomic_inc(sub_compound_mapcount_ptr(&page[i], 1));
 	}
 
 	if (atomic_add_negative(-1, compound_mapcount_ptr(page))) {
@@ -2828,7 +2828,7 @@ static void __split_huge_pud_locked(struct vm_area_struct *vma, pud_t *pud,
 			/* No need in mapcount reference anymore */
 			for (i = 0; i < HPAGE_PUD_NR; i += HPAGE_PMD_NR)
 		/* distinguish between pud compound_mapcount and pmd compound_mapcount */
-				atomic_dec(sub_compound_mapcount_ptr(&page[i]));
+				atomic_dec(sub_compound_mapcount_ptr(&page[i], 1));
 		}
 	}
 
@@ -2860,7 +2860,7 @@ static void __split_huge_pud_locked(struct vm_area_struct *vma, pud_t *pud,
 	if (freeze) {
 		for (i = 0; i < HPAGE_PUD_NR; i += HPAGE_PMD_NR) {
 			/*page_remove_rmap(page + i, true);*/
-			atomic_dec(sub_compound_mapcount_ptr(&page[i]));
+			atomic_dec(sub_compound_mapcount_ptr(&page[i], 1));
 			__dec_node_page_state(page, NR_ANON_THPS);
 			__mod_node_page_state(page_pgdat(page), NR_ANON_MAPPED, -HPAGE_PMD_NR);
 			put_page(page + i);
@@ -2961,7 +2961,7 @@ static void __split_huge_pud_page_tail(struct page *head, int tail,
 
 	VM_BUG_ON_PAGE(page_ref_count(page_tail) != 0, page_tail);
 
-	atomic_set(sub_compound_mapcount_ptr(page_tail), -1);
+	atomic_set(sub_compound_mapcount_ptr(page_tail, 1), -1);
 
 	clear_compound_head(page_tail);
 	prep_compound_page(page_tail, HPAGE_PMD_ORDER);
