@@ -1708,7 +1708,7 @@ discard:
 		 *
 		 * See Documentation/vm/mmu_notifier.txt
 		 */
-		page_remove_rmap(subpage, PageHuge(page) || PageTransHuge(subpage));
+		page_remove_rmap(subpage, PageHuge(page));
 		put_page(page);
 	}
 
