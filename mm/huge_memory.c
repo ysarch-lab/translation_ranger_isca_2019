@@ -4033,6 +4033,8 @@ static unsigned long deferred_split_count(struct shrinker *shrink,
 	return READ_ONCE(pgdata->split_queue_len);
 }
 
+#define deferred_list_entry(x) (compound_head(list_entry((void*)x, struct page, mapping)))
+
 static unsigned long deferred_split_scan(struct shrinker *shrink,
 		struct shrink_control *sc)
 {
@@ -4045,8 +4047,7 @@ static unsigned long deferred_split_scan(struct shrinker *shrink,
 	spin_lock_irqsave(&pgdata->split_queue_lock, flags);
 	/* Take pin on all head pages to avoid freeing them under us */
 	list_for_each_safe(pos, next, &pgdata->split_queue) {
-		page = list_entry((void *)pos, struct page, mapping);
-		page = compound_head(page);
+		page = deferred_list_entry(pos);
 		if (get_page_unless_zero(page)) {
 			list_move(page_deferred_list(page), &list);
 		} else {
@@ -4060,7 +4061,7 @@ static unsigned long deferred_split_scan(struct shrinker *shrink,
 	spin_unlock_irqrestore(&pgdata->split_queue_lock, flags);
 
 	list_for_each_safe(pos, next, &list) {
-		page = list_entry((void *)pos, struct page, mapping);
+		page = deferred_list_entry(pos);
 		if (!trylock_page(page))
 			goto next;
 		/* split_huge_page() removes page from list on success */
