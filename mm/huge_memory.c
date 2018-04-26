@@ -2764,7 +2764,7 @@ static void __split_huge_pud_locked(struct vm_area_struct *vma, pud_t *pud,
 	struct mm_struct *mm = vma->vm_mm;
 	struct page *page;
 	pgtable_t pgtable;
-	pud_t _pud;
+	pud_t _pud, old_pud;
 	bool young, write, dirty, soft_dirty;
 	unsigned long addr;
 	int i;
@@ -2806,13 +2806,18 @@ static void __split_huge_pud_locked(struct vm_area_struct *vma, pud_t *pud,
 		return __split_huge_zero_page_pud(vma, haddr, pud);
 	}
 
-	page = pud_page(*pud);
+	/* See the comment above pmdp_invalidate() in __split_huge_pmd_locked() */
+	old_pud = pudp_invalidate(vma, haddr, pud);
+
+	page = pud_page(old_pud);
 	VM_BUG_ON_PAGE(!page_count(page), page);
 	page_ref_add(page, (1<<(HPAGE_PUD_ORDER-HPAGE_PMD_ORDER)) - 1);
-	write = pud_write(*pud);
-	young = pud_young(*pud);
-	dirty = pud_dirty(*pud);
-	soft_dirty = pud_soft_dirty(*pud);
+	if (pud_dirty(old_pud))
+		SetPageDirty(page);
+	write = pud_write(old_pud);
+	young = pud_young(old_pud);
+	dirty = pud_dirty(old_pud);
+	soft_dirty = pud_soft_dirty(old_pud);
 
 	pgtable = pgtable_trans_huge_pud_withdraw(mm, pud);
 	pud_populate_with_pgtable(mm, &_pud, pgtable);
@@ -2841,8 +2846,6 @@ static void __split_huge_pud_locked(struct vm_area_struct *vma, pud_t *pud,
 			if (soft_dirty)
 				entry = pmd_mksoft_dirty(entry);
 		}
-		if (dirty)
-			SetPageDirty(page + i);
 		pmd = pmd_offset(&_pud, addr);
 		BUG_ON(!pmd_none(*pmd));
 		set_pmd_at(mm, addr, pmd, entry);
@@ -2873,28 +2876,6 @@ static void __split_huge_pud_locked(struct vm_area_struct *vma, pud_t *pud,
 	}
 
 	smp_wmb(); /* make pte visible before pmd */
-	/*
-	 * Up to this point the pmd is present and huge and userland has the
-	 * whole access to the hugepage during the split (which happens in
-	 * place). If we overwrite the pmd with the not-huge version pointing
-	 * to the pte here (which of course we could if all CPUs were bug
-	 * free), userland could trigger a small page size TLB miss on the
-	 * small sized TLB while the hugepage TLB entry is still established in
-	 * the huge TLB. Some CPU doesn't like that.
-	 * See http://support.amd.com/us/Processor_TechDocs/41322.pdf, Erratum
-	 * 383 on page 93. Intel should be safe but is also warns that it's
-	 * only safe if the permission and cache attributes of the two entries
-	 * loaded in the two TLB is identical (which should be the case here).
-	 * But it is generally safer to never allow small and huge TLB entries
-	 * for the same virtual address to be loaded simultaneously. So instead
-	 * of doing "pmd_populate(); flush_pmd_tlb_range();" we first mark the
-	 * current pmd notpresent (atomically because here the pmd_trans_huge
-	 * and pmd_trans_splitting must remain set at all times on the pmd
-	 * until the split is complete for this pmd), then we flush the SMP TLB
-	 * and finally we write the non-huge version of the pmd entry with
-	 * pmd_populate.
-	 */
-	pudp_invalidate(vma, haddr, pud);
 	pud_populate_with_pgtable(mm, pud, pgtable);
 
 	if (freeze) {

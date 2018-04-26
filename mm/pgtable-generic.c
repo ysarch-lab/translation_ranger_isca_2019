@@ -237,12 +237,12 @@ pmd_t pmdp_invalidate(struct vm_area_struct *vma, unsigned long address,
 #endif
 
 #ifndef __HAVE_ARCH_PUDP_INVALIDATE
-void pudp_invalidate(struct vm_area_struct *vma, unsigned long address,
+pud_t pudp_invalidate(struct vm_area_struct *vma, unsigned long address,
 		     pud_t *pudp)
 {
-	pud_t entry = *pudp;
-	set_pud_at(vma->vm_mm, address, pudp, pud_mknotpresent(entry));
+	pud_t old = pudp_establish(vma, address, pudp, pud_mknotpresent(*pudp));
 	flush_pud_tlb_range(vma, address, address + HPAGE_PUD_SIZE);
+	return old;
 }
 #endif
 

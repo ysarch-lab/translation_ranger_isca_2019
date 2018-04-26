@@ -347,7 +347,7 @@ extern pmd_t pmdp_invalidate(struct vm_area_struct *vma, unsigned long address,
 #endif
 
 #ifndef __HAVE_ARCH_PUDP_INVALIDATE
-extern void pudp_invalidate(struct vm_area_struct *vma, unsigned long address,
+extern pud_t pudp_invalidate(struct vm_area_struct *vma, unsigned long address,
 			    pud_t *pudp);
 #endif
 
