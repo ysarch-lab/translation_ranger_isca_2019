@@ -578,6 +578,23 @@ static inline int PageTransTail(struct page *page)
 	return PageTail(page);
 }
 
+#define HPAGE_PMD_SHIFT PMD_SHIFT
+#define HPAGE_PMD_ORDER (HPAGE_PMD_SHIFT-PAGE_SHIFT)
+#define HPAGE_PMD_NR (1<<HPAGE_PMD_ORDER)
+
+#define HPAGE_PUD_SHIFT PUD_SHIFT
+#define HPAGE_PUD_ORDER (HPAGE_PUD_SHIFT-PAGE_SHIFT)
+#define HPAGE_PUD_NR (1<<HPAGE_PUD_ORDER)
+
+static inline unsigned int compound_order(struct page *page);
+
+static inline int PMDPageInPUD(struct page *page)
+{
+	struct page *head = compound_head(page);
+	return (PageCompound(page) && compound_order(head) == HPAGE_PUD_ORDER &&
+		((page - head) % HPAGE_PMD_NR == 0));
+}
+
 /*
  * PageDoubleMap indicates that the compound page is mapped with PTEs as well
  * as PMDs.
@@ -593,30 +610,72 @@ static inline int PageTransTail(struct page *page)
  */
 static inline int PageDoubleMap(struct page *page)
 {
-	return PageHead(page) && test_bit(PG_double_map, &page[1].flags);
+	return (PageHead(page) || PMDPageInPUD(page)) &&
+		test_bit(PG_double_map, &compound_head(page)[1].flags);
 }
 
 static inline void SetPageDoubleMap(struct page *page)
 {
-	VM_BUG_ON_PAGE(!PageHead(page), page);
-	set_bit(PG_double_map, &page[1].flags);
+	VM_BUG_ON_PAGE(!PageHead(page) && !PMDPageInPUD(page), page);
+	set_bit(PG_double_map, &compound_head(page)[1].flags);
 }
 
 static inline void ClearPageDoubleMap(struct page *page)
 {
-	VM_BUG_ON_PAGE(!PageHead(page), page);
-	clear_bit(PG_double_map, &page[1].flags);
+	VM_BUG_ON_PAGE(!PageHead(page) && !PMDPageInPUD(page), page);
+	clear_bit(PG_double_map, &compound_head(page)[1].flags);
 }
 static inline int TestSetPageDoubleMap(struct page *page)
 {
-	VM_BUG_ON_PAGE(!PageHead(page), page);
-	return test_and_set_bit(PG_double_map, &page[1].flags);
+	VM_BUG_ON_PAGE(!PageHead(page) && !PMDPageInPUD(page), page);
+	return test_and_set_bit(PG_double_map, &compound_head(page)[1].flags);
 }
 
 static inline int TestClearPageDoubleMap(struct page *page)
 {
+	VM_BUG_ON_PAGE(!PageHead(page) && !PMDPageInPUD(page), page);
+	return test_and_clear_bit(PG_double_map, &compound_head(page)[1].flags);
+}
+
+/*
+ * PagePUDDoubleMap indicates that the compound page is mapped with PMDs as well
+ * as PUDs.
+ *
+ * This is required for optimization of rmap operations for THP: we can postpone
+ * per small page mapcount accounting (and its overhead from atomic operations)
+ * until the first PMD split.
+ *
+ * For the page PageDoubleMap means ->_mapcount in all sub-pages is offset up
+ * by one. This reference will go away with last compound_mapcount.
+ *
+ * See also __split_huge_pmd_locked() and page_remove_anon_compound_rmap().
+ */
+static inline int PagePUDDoubleMap(struct page *page)
+{
+	return PageHead(page) && test_bit(PG_double_map, &page[2].flags);
+}
+
+static inline void SetPagePUDDoubleMap(struct page *page)
+{
 	VM_BUG_ON_PAGE(!PageHead(page), page);
-	return test_and_clear_bit(PG_double_map, &page[1].flags);
+	set_bit(PG_double_map, &page[2].flags);
+}
+
+static inline void ClearPagePUDDoubleMap(struct page *page)
+{
+	VM_BUG_ON_PAGE(!PageHead(page), page);
+	clear_bit(PG_double_map, &page[2].flags);
+}
+static inline int TestSetPagePUDDoubleMap(struct page *page)
+{
+	VM_BUG_ON_PAGE(!PageHead(page), page);
+	return test_and_set_bit(PG_double_map, &page[2].flags);
+}
+
+static inline int TestClearPagePUDDoubleMap(struct page *page)
+{
+	VM_BUG_ON_PAGE(!PageHead(page), page);
+	return test_and_clear_bit(PG_double_map, &page[2].flags);
 }
 
 #else
@@ -624,9 +683,13 @@ TESTPAGEFLAG_FALSE(TransHuge)
 TESTPAGEFLAG_FALSE(TransCompound)
 TESTPAGEFLAG_FALSE(TransCompoundMap)
 TESTPAGEFLAG_FALSE(TransTail)
+TESTPAGEFLAG_FALSE(PMDPageInPUD)
 PAGEFLAG_FALSE(DoubleMap)
 	TESTSETFLAG_FALSE(DoubleMap)
 	TESTCLEARFLAG_FALSE(DoubleMap)
+PAGEFLAG_FALSE(PUDDoubleMap)
+	TESTSETFLAG_FALSE(PUDDoubleMap)
+	TESTCLEARFLAG_FALSE(PUDDoubleMap)
 #endif
 
 /*
