@@ -2415,7 +2415,7 @@ int zap_huge_pmd(struct mmu_gather *tlb, struct vm_area_struct *vma,
 			page = pmd_page(orig_pmd);
 			page_remove_rmap(page, true);
 			VM_BUG_ON_PAGE(page_mapcount(page) < 0, page);
-			VM_BUG_ON_PAGE(!PageHead(page), page);
+			VM_BUG_ON_PAGE(!PageHead(page) && !PMDPageInPUD(page), page);
 		} else if (thp_migration_supported()) {
 			swp_entry_t entry;
 
@@ -3451,12 +3451,15 @@ static void __split_huge_pmd_locked(struct vm_area_struct *vma, pmd_t *pmd,
 	 * Set PG_double_map before dropping compound_mapcount to avoid
 	 * false-negative page_mapped().
 	 */
-	if (compound_mapcount(page) > 1 && !TestSetPageDoubleMap(page)) {
+	if (((PMDPageInPUD(page) && sub_compound_mapcount(page) > (1 + PagePUDDoubleMap(compound_head(page)))) ||
+		 compound_mapcount(page) > 1)
+		&& !TestSetPageDoubleMap(page)) {
 		for (i = 0; i < HPAGE_PMD_NR; i++)
 			atomic_inc(&page[i]._mapcount);
 	}
 
-	if (atomic_add_negative(-1, compound_mapcount_ptr(page))) {
+	if ((PMDPageInPUD(page) && atomic_add_negative(-(1 + PagePUDDoubleMap(compound_head(page))), sub_compound_mapcount_ptr(page, 1))) ||
+		atomic_add_negative(-1, compound_mapcount_ptr(page))) {
 		/* Last compound_mapcount is gone. */
 		__dec_node_page_state(page, NR_ANON_THPS);
 		if (TestClearPageDoubleMap(page)) {
