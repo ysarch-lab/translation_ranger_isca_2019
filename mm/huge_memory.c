@@ -1613,7 +1613,7 @@ static int do_huge_pud_wp_page_fallback(struct vm_fault *vmf, pud_t orig_pud,
 
 	smp_wmb(); /* make pte visible before pmd */
 	pud_populate_with_pgtable(vma->vm_mm, vmf->pud, pgtable);
-	page_remove_rmap(page, true);
+	page_remove_rmap(page, true, HPAGE_PUD_ORDER);
 	spin_unlock(vmf->ptl);
 
 	/*
@@ -1767,7 +1767,7 @@ alloc:
 			add_mm_counter(vma->vm_mm, MM_ANONPAGES, HPAGE_PUD_NR);
 		} else {
 			VM_BUG_ON_PAGE(!PageHead(page), page);
-			page_remove_rmap(page, true);
+			page_remove_rmap(page, true, HPAGE_PUD_ORDER);
 			put_page(page);
 		}
 		ret |= VM_FAULT_WRITE;
@@ -1899,7 +1899,7 @@ static int do_huge_pmd_wp_page_fallback(struct vm_fault *vmf, pmd_t orig_pmd,
 
 	smp_wmb(); /* make pte visible before pmd */
 	pmd_populate(vma->vm_mm, vmf->pmd, pgtable);
-	page_remove_rmap(page, true);
+	page_remove_rmap(page, true, HPAGE_PMD_ORDER);
 	spin_unlock(vmf->ptl);
 
 	/*
@@ -2049,7 +2049,7 @@ alloc:
 			add_mm_counter(vma->vm_mm, MM_ANONPAGES, HPAGE_PMD_NR);
 		} else {
 			VM_BUG_ON_PAGE(!PageHead(page), page);
-			page_remove_rmap(page, true);
+			page_remove_rmap(page, true, HPAGE_PMD_ORDER);
 			put_page(page);
 		}
 		ret |= VM_FAULT_WRITE;
@@ -2413,7 +2413,7 @@ int zap_huge_pmd(struct mmu_gather *tlb, struct vm_area_struct *vma,
 
 		if (pmd_present(orig_pmd)) {
 			page = pmd_page(orig_pmd);
-			page_remove_rmap(page, true);
+			page_remove_rmap(page, true, HPAGE_PMD_ORDER);
 			VM_BUG_ON_PAGE(page_mapcount(page) < 0, page);
 			VM_BUG_ON_PAGE(!PageHead(page) && !PMDPageInPUD(page), page);
 		} else if (thp_migration_supported()) {
@@ -2693,7 +2693,7 @@ int zap_huge_pud(struct mmu_gather *tlb, struct vm_area_struct *vma,
 
 		if (pud_present(orig_pud)) {
 			page = pud_page(orig_pud);
-			page_remove_rmap(page, true);
+			page_remove_rmap(page, true, HPAGE_PUD_ORDER);
 			VM_BUG_ON_PAGE(page_mapcount(page) < 0, page);
 			VM_BUG_ON_PAGE(!PageHead(page), page);
 		} else
@@ -2789,7 +2789,7 @@ static void __split_huge_pud_locked(struct vm_area_struct *vma, pud_t *pud,
 		page = pud_page(_pud);
 		if (!PageReferenced(page) && pud_young(_pud))
 			SetPageReferenced(page);
-		page_remove_rmap(page, true);
+		page_remove_rmap(page, true, HPAGE_PUD_ORDER);
 		put_page(page);
 		add_mm_counter(mm, MM_FILEPAGES, -HPAGE_PUD_NR);
 		return;
@@ -2880,7 +2880,7 @@ static void __split_huge_pud_locked(struct vm_area_struct *vma, pud_t *pud,
 
 	if (freeze) {
 		for (i = 0; i < HPAGE_PUD_NR; i += HPAGE_PMD_NR) {
-			/*page_remove_rmap(page + i, true);*/
+			/*page_remove_rmap(page + i, true, HPAGE_PMD_ORDER);*/
 			atomic_dec(sub_compound_mapcount_ptr(&page[i], 1));
 			__dec_node_page_state(page, NR_ANON_THPS);
 			__mod_node_page_state(page_pgdat(page), NR_ANON_MAPPED, -HPAGE_PMD_NR);
@@ -3264,7 +3264,7 @@ int split_huge_pud_page_to_list(struct page *page, struct list_head *list)
 			BUG();
 		}
 		spin_unlock(&pgdata->split_queue_lock);
-fail:		
+fail:
 		if (mapping) {
 			VM_BUG_ON(1);
 			spin_unlock(&mapping->tree_lock);
@@ -3353,7 +3353,7 @@ static void __split_huge_pmd_locked(struct vm_area_struct *vma, pmd_t *pmd,
 		page = pmd_page(_pmd);
 		if (!PageReferenced(page) && pmd_young(_pmd))
 			SetPageReferenced(page);
-		page_remove_rmap(page, true);
+		page_remove_rmap(page, true, HPAGE_PMD_ORDER);
 		put_page(page);
 		add_mm_counter(mm, MM_FILEPAGES, -HPAGE_PMD_NR);
 		return;
@@ -3474,7 +3474,7 @@ static void __split_huge_pmd_locked(struct vm_area_struct *vma, pmd_t *pmd,
 
 	if (freeze) {
 		for (i = 0; i < HPAGE_PMD_NR; i++) {
-			page_remove_rmap(page + i, false);
+			page_remove_rmap(page + i, false, 0);
 			put_page(page + i);
 		}
 	}
@@ -4219,7 +4219,7 @@ void set_pmd_migration_entry(struct page_vma_mapped_walk *pvmw,
 	if (pmd_soft_dirty(pmdval))
 		pmdswp = pmd_swp_mksoft_dirty(pmdswp);
 	set_pmd_at(mm, address, pvmw->pmd, pmdswp);
-	page_remove_rmap(page, true);
+	page_remove_rmap(page, true, HPAGE_PMD_ORDER);
 	put_page(page);
 
 	mmu_notifier_invalidate_range_end(mm, address,

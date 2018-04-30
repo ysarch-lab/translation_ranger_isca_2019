@@ -657,7 +657,7 @@ static void __collapse_huge_page_copy(pte_t *pte, struct page *page,
 			 * superfluous.
 			 */
 			pte_clear(vma->vm_mm, address, _pte);
-			page_remove_rmap(src_page, false);
+			page_remove_rmap(src_page, false, 0);
 			spin_unlock(ptl);
 			free_page_and_swap_cache(src_page);
 		}
