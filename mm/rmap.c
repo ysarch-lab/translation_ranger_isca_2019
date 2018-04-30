@@ -1094,9 +1094,9 @@ static void __page_check_anon_rmap(struct page *page,
  * (but PageKsm is never downgraded to PageAnon).
  */
 void page_add_anon_rmap(struct page *page,
-	struct vm_area_struct *vma, unsigned long address, bool compound)
+	struct vm_area_struct *vma, unsigned long address, bool compound, int order)
 {
-	do_page_add_anon_rmap(page, vma, address, compound ? RMAP_COMPOUND : 0);
+	do_page_add_anon_rmap(page, vma, address, compound ? RMAP_COMPOUND : 0, order);
 }
 
 /*
@@ -1105,7 +1105,7 @@ void page_add_anon_rmap(struct page *page,
  * Everybody else should continue to use page_add_anon_rmap above.
  */
 void do_page_add_anon_rmap(struct page *page,
-	struct vm_area_struct *vma, unsigned long address, int flags)
+	struct vm_area_struct *vma, unsigned long address, int flags, int order)
 {
 	bool compound = flags & RMAP_COMPOUND;
 	bool first;
@@ -1114,7 +1114,18 @@ void do_page_add_anon_rmap(struct page *page,
 		atomic_t *mapcount;
 		VM_BUG_ON_PAGE(!PageLocked(page), page);
 		VM_BUG_ON_PAGE(!PageTransHuge(page), page);
-		mapcount = compound_mapcount_ptr(page);
+		if (compound_order(page) == HPAGE_PUD_ORDER) {
+			if (order == HPAGE_PUD_ORDER) {
+				mapcount = compound_mapcount_ptr(page);
+			} else if (order == HPAGE_PMD_ORDER) {
+				VM_BUG_ON(!PMDPageInPUD(page));
+				mapcount = sub_compound_mapcount_ptr(page, 1);
+			} else
+				VM_BUG_ON(1);
+		} else if (compound_order(page) == HPAGE_PMD_ORDER) {
+			mapcount = compound_mapcount_ptr(page);
+		} else
+			VM_BUG_ON(1);
 		first = atomic_inc_and_test(mapcount);
 	} else {
 		first = atomic_inc_and_test(&page->_mapcount);
@@ -1129,7 +1140,7 @@ void do_page_add_anon_rmap(struct page *page,
 		 * disabled.
 		 */
 		if (compound) {
-			if (nr == HPAGE_PMD_NR)
+			if (order == HPAGE_PMD_ORDER)
 				__inc_node_page_state(page, NR_ANON_THPS);
 			else
 				__inc_node_page_state(page, NR_ANON_THPS_PUD);

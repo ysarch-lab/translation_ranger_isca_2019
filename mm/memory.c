@@ -3062,7 +3062,7 @@ int do_swap_page(struct vm_fault *vmf)
 		mem_cgroup_commit_charge(page, memcg, false, false);
 		lru_cache_add_active_or_unevictable(page, vma);
 	} else {
-		do_page_add_anon_rmap(page, vma, vmf->address, exclusive);
+		do_page_add_anon_rmap(page, vma, vmf->address, exclusive, 0);
 		mem_cgroup_commit_charge(page, memcg, true, false);
 		activate_page(page);
 	}

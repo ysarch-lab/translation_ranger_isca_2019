@@ -4247,7 +4247,7 @@ void remove_migration_pmd(struct page_vma_mapped_walk *pvmw, struct page *new)
 		pmde = maybe_pmd_mkwrite(pmde, vma);
 
 	flush_cache_range(vma, mmun_start, mmun_start + HPAGE_PMD_SIZE);
-	page_add_anon_rmap(new, vma, mmun_start, true);
+	page_add_anon_rmap(new, vma, mmun_start, true, HPAGE_PMD_ORDER);
 	set_pmd_at(mm, mmun_start, pvmw->pmd, pmde);
 	if (vma->vm_flags & VM_LOCKED)
 		mlock_vma_page(new);
