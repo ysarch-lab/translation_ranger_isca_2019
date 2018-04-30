@@ -1161,7 +1161,7 @@ void do_page_add_anon_rmap(struct page *page,
  * Page does not have to be locked.
  */
 void page_add_new_anon_rmap(struct page *page,
-	struct vm_area_struct *vma, unsigned long address, bool compound)
+	struct vm_area_struct *vma, unsigned long address, bool compound, int order)
 {
 	int nr = compound ? hpage_nr_pages(page) : 1;
 
@@ -1171,10 +1171,14 @@ void page_add_new_anon_rmap(struct page *page,
 		VM_BUG_ON_PAGE(!PageTransHuge(page), page);
 		/* increment count (starts at -1) */
 		atomic_set(compound_mapcount_ptr(page), 0);
-		if (nr == HPAGE_PMD_NR)
-			__inc_node_page_state(page, NR_ANON_THPS);
-		else
+		if (compound_order(page) == HPAGE_PUD_ORDER) {
+			VM_BUG_ON(order == HPAGE_PMD_ORDER);
+			/* Anon THP always mapped first with PMD */
 			__inc_node_page_state(page, NR_ANON_THPS_PUD);
+		} else if (compound_order(page) == HPAGE_PMD_ORDER) {
+			__inc_node_page_state(page, NR_ANON_THPS);
+		} else
+			VM_BUG_ON(1);
 	} else {
 		/* Anon THP always mapped first with PMD */
 		VM_BUG_ON_PAGE(PageTransCompound(page), page);
