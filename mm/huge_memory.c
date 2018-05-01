@@ -2851,7 +2851,8 @@ static void __split_huge_pud_locked(struct vm_area_struct *vma, pud_t *pud,
 		set_pmd_at(mm, addr, pmd, entry);
 		/* distinguish between pud compound_mapcount and pmd compound_mapcount */
 		atomic_inc(sub_compound_mapcount_ptr(&page[i], 1));
-		__inc_node_page_state(&page[i], NR_ANON_THPS);
+		pr_debug("page: %px pfn: %lx: sub_compound_mapcount: %d\n",
+				&page[i], page_to_pfn(&page[i]), sub_compound_mapcount(&page[i]));
 	}
 
 	/*
@@ -3445,6 +3446,8 @@ static void __split_huge_pmd_locked(struct vm_area_struct *vma, pmd_t *pmd,
 		set_pte_at(mm, addr, pte, entry);
 		atomic_inc(&page[i]._mapcount);
 		pte_unmap(pte);
+		pr_debug("page: %px pfn: %lx: map_count: %d\n",
+				&page[i], page_to_pfn(&page[i]), atomic_read(&page[i]._mapcount) + 1);
 	}
 
 	/*
