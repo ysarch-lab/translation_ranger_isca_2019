@@ -1069,6 +1069,8 @@ static int find_anchor_pages_in_vma(struct mm_struct *mm,
 	unsigned long scan_address = start_addr;
 	unsigned long end_addr = vma->vm_end - PAGE_SIZE;
 	struct interval_tree_node *existing_anchor;
+	unsigned long new_anchor_vpn = 0;
+	unsigned long new_anchor_pfn = 0;
 
 	/* Out of range query  */
 	if (start_addr >= vma->vm_end || start_addr < vma->vm_start)
@@ -1174,6 +1176,10 @@ insert_new_range: /* start_addr to end_addr  */
 
 		if (scan_address >= end_addr)
 			break;
+		if (anchor_page) {
+			new_anchor_vpn = (scan_address - get_contig_page_size(anchor_page))>>PAGE_SHIFT;
+			new_anchor_pfn = page_to_pfn(anchor_page);
+		}
 	}
 
 	if (!anchor_page) {
@@ -1181,8 +1187,8 @@ insert_new_range: /* start_addr to end_addr  */
 		goto out;
 	}
 
-	anchor_node->anchor_vpn = (scan_address - get_contig_page_size(anchor_page))>>PAGE_SHIFT;
-	anchor_node->anchor_pfn = page_to_pfn(anchor_page);
+	anchor_node->anchor_vpn = new_anchor_vpn;
+	anchor_node->anchor_pfn = new_anchor_pfn;
 
 	interval_tree_insert(&anchor_node->node, &vma->anchor_page_rb);
 
