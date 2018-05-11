@@ -1068,7 +1068,8 @@ static int find_anchor_pages_in_vma(struct mm_struct *mm,
 	struct page *anchor_page = NULL;
 	unsigned long scan_address = start_addr;
 	unsigned long end_addr = vma->vm_end - PAGE_SIZE;
-	struct interval_tree_node *existing_anchor;
+	struct interval_tree_node *existing_anchor = NULL;
+	unsigned long existing_anchor_pfn = 0;
 	unsigned long new_anchor_vpn = 0;
 	unsigned long new_anchor_pfn = 0;
 
@@ -1117,6 +1118,13 @@ static int find_anchor_pages_in_vma(struct mm_struct *mm,
 			return 0;
 		else if (existing_anchor->start < start_addr &&
 				 existing_anchor->last >= start_addr){
+			struct anchor_page_node *existing_node = container_of(existing_anchor,
+				struct anchor_page_node, node);
+			existing_anchor_pfn = existing_node->anchor_pfn;
+
+			pr_debug("Cut existing anchor: range: [%lx, %lx], anchor: vpn: %lx, pfn: %lx\n",
+				existing_anchor->start, existing_anchor->last,
+				existing_node->anchor_vpn, existing_node->anchor_pfn);
 			/* cut existing range, because some not movable pages  */
 			interval_tree_remove(existing_anchor, &vma->anchor_page_rb);
 			existing_anchor->last = start_addr - PAGE_SIZE;
@@ -1167,21 +1175,25 @@ insert_new_range: /* start_addr to end_addr  */
 	anchor_node->node.last = end_addr;
 
 	/* use first available page  */
-	while (!anchor_page) {
+	while (!anchor_page && scan_address < end_addr) {
 		down_read(&vma->vm_mm->mmap_sem);
 		anchor_page = follow_page(vma, scan_address,
 			FOLL_MIGRATION | FOLL_REMOTE);
 		up_read(&vma->vm_mm->mmap_sem);
 		scan_address += anchor_page?get_contig_page_size(anchor_page):PAGE_SIZE;
 
-		if (scan_address >= end_addr)
-			break;
 		if (anchor_page) {
 			new_anchor_vpn = (scan_address - get_contig_page_size(anchor_page))>>PAGE_SHIFT;
 			new_anchor_pfn = page_to_pfn(anchor_page);
 
 			new_anchor_vpn &= (PUD_MASK>>PAGE_SHIFT);
 			new_anchor_pfn &= (PUD_MASK>>PAGE_SHIFT);
+
+			if (existing_anchor_pfn &&
+				existing_anchor_pfn == new_anchor_pfn) {
+				anchor_page = NULL;
+				continue;
+			}
 		}
 	}
 
