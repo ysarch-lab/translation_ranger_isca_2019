@@ -1179,6 +1179,9 @@ insert_new_range: /* start_addr to end_addr  */
 		if (anchor_page) {
 			new_anchor_vpn = (scan_address - get_contig_page_size(anchor_page))>>PAGE_SHIFT;
 			new_anchor_pfn = page_to_pfn(anchor_page);
+
+			new_anchor_vpn &= (PUD_MASK>>PAGE_SHIFT);
+			new_anchor_pfn &= (PUD_MASK>>PAGE_SHIFT);
 		}
 	}
 
