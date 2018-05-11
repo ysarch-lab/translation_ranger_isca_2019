@@ -1454,7 +1454,7 @@ continue_defrag:
 					 */
 					used_len = scnprintf(stats_buf + pos, remain_buf_len,
 						"[0x%lx, 0x%lx):%lu [alig:%lu, migrated:%lu, src: not:%lu, com:%lu, dst: bound:%lu, com:%lu, free:%lu, anon:%lu, file:%lu, misc:%lu], "
-						"anchor: (%lx, %lx), range: [%lx, %lx]\n",
+						"anchor: (%lx, %lx), range: [%lx, %lx], vma: 0x%lx, not_defrag_vpn: %lx\n",
 						*scan_address, defrag_end,
 						(defrag_end - *scan_address)/PAGE_SIZE,
 						defrag_stats.aligned,
@@ -1470,7 +1470,9 @@ continue_defrag:
 						anchor_node->anchor_vpn,
 						anchor_node->anchor_pfn,
 						anchor_node->node.start,
-						anchor_node->node.last
+						anchor_node->node.last,
+						(unsigned long)vma+vma->vma_create_jiffies,
+						defrag_stats.not_defrag_vpn
 						);
 
 					remain_buf_len -= used_len;
