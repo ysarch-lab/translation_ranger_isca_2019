@@ -1426,7 +1426,7 @@ static int kmem_defragd_scan_mm(struct defrag_scan_control *sc)
 			} else if (sc->action == MEM_DEFRAG_DO_DEFRAG) {
 				/* go to nearest 2MB aligned address  */
 				unsigned long defrag_end = min_t(unsigned long,
-							(*scan_address + HPAGE_PMD_SIZE) & HPAGE_PMD_MASK,
+							(*scan_address + HPAGE_PUD_SIZE) & HPAGE_PUD_MASK,
 							vend);
 				int defrag_result;
 				/*bool found_anchor_page;*/
