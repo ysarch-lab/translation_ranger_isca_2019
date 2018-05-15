@@ -66,6 +66,12 @@
 #define MADV_MEMDEFRAG	20		/* Worth backing with hugepages */
 #define MADV_NOMEMDEFRAG	21		/* Not worth backing with hugepages */
 
+#define MADV_SPLITHUGEPAGE	24		/* Split huge page in range once */
+#define MADV_PROMOTEHUGEPAGE	25		/* Promote range into huge page */
+
+#define MADV_SPLITHUGEMAP	26		/* Split huge page table entry in range once */
+#define MADV_PROMOTEHUGEMAP	27		/* Promote range into huge page table entry */
+
 /* compatibility flags */
 #define MAP_FILE	0
 

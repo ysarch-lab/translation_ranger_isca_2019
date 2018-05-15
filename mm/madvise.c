@@ -623,6 +623,37 @@ static long madvise_memdefrag(struct vm_area_struct *vma,
 	*prev = vma;
 	return memdefrag_madvise(vma, &vma->vm_flags, behavior);
 }
+
+static long madvise_split_promote_hugepage(struct vm_area_struct *vma,
+		     struct vm_area_struct **prev,
+		     unsigned long start, unsigned long end, int behavior)
+{
+	struct page *page;
+	*prev = vma;
+
+	for (; start < end; start += HPAGE_PMD_SIZE) {
+		switch (behavior) {
+		case MADV_SPLITHUGEMAP:
+			split_huge_pmd_address(vma, start, false, NULL);
+			break;
+		case MADV_SPLITHUGEPAGE:
+			page = follow_page(vma, start, FOLL_GET);
+			if (page) {
+				lock_page(page);
+				if (split_huge_page(page))
+					pr_debug("%s: fail to split page\n", __func__);
+				unlock_page(page);
+				put_page(page);
+			}
+			break;
+		default:
+			break;
+		}
+	}
+
+	return 0;
+}
+
 #ifdef CONFIG_MEMORY_FAILURE
 /*
  * Error injection support for memory error handling.
@@ -697,6 +728,11 @@ madvise_vma(struct vm_area_struct *vma, struct vm_area_struct **prev,
 	case MADV_MEMDEFRAG:
 	case MADV_NOMEMDEFRAG:
 		return madvise_memdefrag(vma, prev, start, end, behavior);
+	case MADV_SPLITHUGEPAGE:
+	case MADV_PROMOTEHUGEPAGE:
+	case MADV_SPLITHUGEMAP:
+	case MADV_PROMOTEHUGEMAP:
+		return madvise_split_promote_hugepage(vma, prev, start, end, behavior);
 	default:
 		return madvise_behavior(vma, prev, start, end, behavior);
 	}
@@ -733,6 +769,10 @@ madvise_behavior_valid(int behavior)
 #endif
 	case MADV_MEMDEFRAG:
 	case MADV_NOMEMDEFRAG:
+	case MADV_SPLITHUGEPAGE:
+	case MADV_PROMOTEHUGEPAGE:
+	case MADV_SPLITHUGEMAP:
+	case MADV_PROMOTEHUGEMAP:
 		return true;
 
 	default:

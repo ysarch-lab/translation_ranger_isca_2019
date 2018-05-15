@@ -121,6 +121,8 @@ extern int vma_no_repeat_defrag;
 extern int num_breakout_chunks;
 extern int khugepaged_daemon;
 
+extern int only_print_head_pfn;
+
 /* Constants used for minimum and  maximum */
 #ifdef CONFIG_LOCKUP_DETECTOR
 static int sixty = 60;
@@ -1705,6 +1707,15 @@ static struct ctl_table vm_table[] = {
 		.procname	= "khugepaged_daemon",
 		.data		= &khugepaged_daemon,
 		.maxlen		= sizeof(khugepaged_daemon),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &zero,
+		.extra2		= &one,
+	},
+	{
+		.procname	= "only_print_head_pfn",
+		.data		= &only_print_head_pfn,
+		.maxlen		= sizeof(only_print_head_pfn),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_minmax,
 		.extra1		= &zero,
