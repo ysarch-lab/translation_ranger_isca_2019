@@ -4258,6 +4258,7 @@ void remove_migration_pmd(struct page_vma_mapped_walk *pvmw, struct page *new)
 }
 #endif
 
+#if 0
 /* Racy check whether the huge page can be split */
 static bool can_promote_huge_page(struct page *page)
 {
@@ -4275,6 +4276,120 @@ static bool can_promote_huge_page(struct page *page)
  * unsigned long address, pte_t *pte) to isolate all subpages into a list,
  * then call promote_list_to_huge_page() to promote in-place
  */
+
+static int __promote_huge_page_isolate(struct vm_area_struct *vma,
+					unsigned long address,
+					pte_t *pte)
+{
+	struct page *page = NULL;
+	pte_t *_pte;
+	int none_or_zero = 0, result = 0, referenced = 0;
+	bool writable = false;
+
+	for (_pte = pte; _pte < pte+HPAGE_PMD_NR;
+	     _pte++, address += PAGE_SIZE) {
+		pte_t pteval = *_pte;
+		if (pte_none(pteval) || (pte_present(pteval) &&
+				is_zero_pfn(pte_pfn(pteval)))) {
+			if (!userfaultfd_armed(vma) &&
+			    ++none_or_zero <= khugepaged_max_ptes_none) {
+				continue;
+			} else {
+				result = SCAN_EXCEED_NONE_PTE;
+				goto out;
+			}
+		}
+		if (!pte_present(pteval)) {
+			result = SCAN_PTE_NON_PRESENT;
+			goto out;
+		}
+		page = vm_normal_page(vma, address, pteval);
+		if (unlikely(!page)) {
+			result = SCAN_PAGE_NULL;
+			goto out;
+		}
+
+		/* TODO: teach khugepaged to collapse THP mapped with pte */
+		if (PageCompound(page)) {
+			result = SCAN_PAGE_COMPOUND;
+			goto out;
+		}
+
+		VM_BUG_ON_PAGE(!PageAnon(page), page);
+
+		/*
+		 * We can do it before isolate_lru_page because the
+		 * page can't be freed from under us. NOTE: PG_lock
+		 * is needed to serialize against split_huge_page
+		 * when invoked from the VM.
+		 */
+		if (!trylock_page(page)) {
+			result = SCAN_PAGE_LOCK;
+			goto out;
+		}
+
+		/*
+		 * cannot use mapcount: can't collapse if there's a gup pin.
+		 * The page must only be referenced by the scanned process
+		 * and page swap cache.
+		 */
+		if (page_count(page) != 1 + PageSwapCache(page)) {
+			unlock_page(page);
+			result = SCAN_PAGE_COUNT;
+			goto out;
+		}
+		if (pte_write(pteval)) {
+			writable = true;
+		} else {
+			if (PageSwapCache(page) &&
+			    !reuse_swap_page(page, NULL)) {
+				unlock_page(page);
+				result = SCAN_SWAP_CACHE_PAGE;
+				goto out;
+			}
+			/*
+			 * Page is not in the swap cache. It can be collapsed
+			 * into a THP.
+			 */
+		}
+
+		/*
+		 * Isolate the page to avoid collapsing an hugepage
+		 * currently in use by the VM.
+		 */
+		if (isolate_lru_page(page)) {
+			unlock_page(page);
+			result = SCAN_DEL_PAGE_LRU;
+			goto out;
+		}
+		inc_node_page_state(page,
+				NR_ISOLATED_ANON + page_is_file_cache(page));
+		VM_BUG_ON_PAGE(!PageLocked(page), page);
+		VM_BUG_ON_PAGE(PageLRU(page), page);
+
+		/* There should be enough young pte to collapse the page */
+		if (pte_young(pteval) ||
+		    page_is_young(page) || PageReferenced(page) ||
+		    mmu_notifier_test_young(vma->vm_mm, address))
+			referenced++;
+	}
+	if (likely(writable)) {
+		if (likely(referenced)) {
+			result = SCAN_SUCCEED;
+			trace_mm_collapse_huge_page_isolate(page, none_or_zero,
+							    referenced, writable, result);
+			return 1;
+		}
+	} else {
+		result = SCAN_PAGE_RO;
+	}
+
+out:
+	release_pte_pages(pte, _pte);
+	trace_mm_collapse_huge_page_isolate(page, none_or_zero,
+					    referenced, writable, result);
+	return 0;
+}
 
 /*
  * This function promotes normal pages into a huge page. @list point to all
@@ -4386,3 +4501,4 @@ out:
 	count_vm_event(!ret ? THP_SPLIT_PAGE : THP_SPLIT_PAGE_FAILED);
 	return ret;
 }
+#endif
