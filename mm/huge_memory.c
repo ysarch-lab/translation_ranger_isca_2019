@@ -4283,7 +4283,7 @@ static int __promote_huge_page_isolate(struct vm_area_struct *vma,
 {
 	struct page *page = NULL;
 	pte_t *_pte;
-	int none_or_zero = 0, result = 0, referenced = 0;
+	int none_or_zero = 0, referenced = 0;
 	bool writable = false;
 
 	for (_pte = pte; _pte < pte+HPAGE_PMD_NR;
@@ -4292,26 +4292,22 @@ static int __promote_huge_page_isolate(struct vm_area_struct *vma,
 		if (pte_none(pteval) || (pte_present(pteval) &&
 				is_zero_pfn(pte_pfn(pteval)))) {
 			if (!userfaultfd_armed(vma) &&
-			    ++none_or_zero <= khugepaged_max_ptes_none) {
+			    ++none_or_zero <= HPAGE_PMD_NR) {
 				continue;
 			} else {
-				result = SCAN_EXCEED_NONE_PTE;
 				goto out;
 			}
 		}
 		if (!pte_present(pteval)) {
-			result = SCAN_PTE_NON_PRESENT;
 			goto out;
 		}
 		page = vm_normal_page(vma, address, pteval);
 		if (unlikely(!page)) {
-			result = SCAN_PAGE_NULL;
 			goto out;
 		}
 
 		/* TODO: teach khugepaged to collapse THP mapped with pte */
 		if (PageCompound(page)) {
-			result = SCAN_PAGE_COMPOUND;
 			goto out;
 		}
 
@@ -4324,7 +4320,6 @@ static int __promote_huge_page_isolate(struct vm_area_struct *vma,
 		 * when invoked from the VM.
 		 */
 		if (!trylock_page(page)) {
-			result = SCAN_PAGE_LOCK;
 			goto out;
 		}
 
@@ -4335,7 +4330,6 @@ static int __promote_huge_page_isolate(struct vm_area_struct *vma,
 		 */
 		if (page_count(page) != 1 + PageSwapCache(page)) {
 			unlock_page(page);
-			result = SCAN_PAGE_COUNT;
 			goto out;
 		}
 		if (pte_write(pteval)) {
@@ -4344,7 +4338,6 @@ static int __promote_huge_page_isolate(struct vm_area_struct *vma,
 			if (PageSwapCache(page) &&
 			    !reuse_swap_page(page, NULL)) {
 				unlock_page(page);
-				result = SCAN_SWAP_CACHE_PAGE;
 				goto out;
 			}
 			/*
@@ -4359,7 +4352,6 @@ static int __promote_huge_page_isolate(struct vm_area_struct *vma,
 		 */
 		if (isolate_lru_page(page)) {
 			unlock_page(page);
-			result = SCAN_DEL_PAGE_LRU;
 			goto out;
 		}
 		inc_node_page_state(page,
@@ -4375,22 +4367,18 @@ static int __promote_huge_page_isolate(struct vm_area_struct *vma,
 	}
 	if (likely(writable)) {
 		if (likely(referenced)) {
-			result = SCAN_SUCCEED;
-			trace_mm_collapse_huge_page_isolate(page, none_or_zero,
-							    referenced, writable, result);
 			return 1;
 		}
 	} else {
-		result = SCAN_PAGE_RO;
+		/*result = SCAN_PAGE_RO;*/
 	}
 
 out:
 	release_pte_pages(pte, _pte);
-	trace_mm_collapse_huge_page_isolate(page, none_or_zero,
-					    referenced, writable, result);
 	return 0;
 }
 
+#if 0
 /*
  * This function promotes normal pages into a huge page. @list point to all
  * subpages of huge page to promote, @head point to the head page.

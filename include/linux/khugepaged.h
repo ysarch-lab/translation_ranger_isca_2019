@@ -55,6 +55,7 @@ static inline int khugepaged_enter(struct vm_area_struct *vma,
 				return -ENOMEM;
 	return 0;
 }
+void release_pte_pages(pte_t *pte, pte_t *_pte);
 #else /* CONFIG_TRANSPARENT_HUGEPAGE */
 static inline int khugepaged_fork(struct mm_struct *mm, struct mm_struct *oldmm)
 {
