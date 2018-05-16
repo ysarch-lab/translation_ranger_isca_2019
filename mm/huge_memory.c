@@ -4258,7 +4258,120 @@ void remove_migration_pmd(struct page_vma_mapped_walk *pvmw, struct page *new)
 }
 #endif
 
-#if 0
+
+/* promote HPAGE_PMD_SIZE range into a PMD map.
+ * mmap_sem needs to be down_write.
+ * */
+int promote_huge_pmd_address(struct vm_area_struct *vma, unsigned long haddr)
+{
+	struct mm_struct *mm = vma->vm_mm;
+	pmd_t *pmd, _pmd;
+	pte_t *pte, *_pte;
+	spinlock_t *pmd_ptl, *pte_ptl;
+	unsigned long mmun_start, mmun_end;
+	pgtable_t pgtable;
+	struct page *page, *head;
+	unsigned long address = haddr;
+	int ret = -EBUSY;
+
+	VM_BUG_ON(haddr & ~HPAGE_PMD_MASK);
+
+	pmd = mm_find_pmd(mm, haddr);
+	if (!pmd || pmd_trans_huge(*pmd))
+		goto out;
+
+	anon_vma_lock_write(vma->anon_vma);
+
+	pte = pte_offset_map(pmd, haddr);
+	pte_ptl = pte_lockptr(mm, pmd);
+
+	head = page = vm_normal_page(vma, haddr, *pte);
+	if (!page || !PageTransCompound(page))
+		goto out_unlock;
+	VM_BUG_ON(page != compound_head(page));
+	lock_page(head);
+
+	mmun_start = haddr;
+	mmun_end   = haddr + HPAGE_PMD_SIZE;
+	mmu_notifier_invalidate_range_start(mm, mmun_start, mmun_end);
+	pmd_ptl = pmd_lock(mm, pmd); /* probably unnecessary */
+	/*
+	 * After this gup_fast can't run anymore. This also removes
+	 * any huge TLB entry from the CPU so we won't allow
+	 * huge and small TLB entries for the same virtual address
+	 * to avoid the risk of CPU bugs in that area.
+	 */
+
+	_pmd = pmdp_collapse_flush(vma, haddr, pmd);
+	spin_unlock(pmd_ptl);
+	mmu_notifier_invalidate_range_end(mm, mmun_start, mmun_end);
+
+	/* remove ptes */
+	for (_pte = pte; _pte < pte + HPAGE_PMD_NR;
+				_pte++, page++, address += PAGE_SIZE) {
+		pte_t pteval = *_pte;
+
+		if (pte_none(pteval) || is_zero_pfn(pte_pfn(pteval))) {
+			if (is_zero_pfn(pte_pfn(pteval))) {
+				/*
+				 * ptl mostly unnecessary.
+				 */
+				spin_lock(pte_ptl);
+				/*
+				 * paravirt calls inside pte_clear here are
+				 * superfluous.
+				 */
+				pte_clear(vma->vm_mm, address, _pte);
+				spin_unlock(pte_ptl);
+			}
+		} else {
+			/*
+			 * ptl mostly unnecessary, but preempt has to
+			 * be disabled to update the per-cpu stats
+			 * inside page_remove_rmap().
+			 */
+			spin_lock(pte_ptl);
+			/*
+			 * paravirt calls inside pte_clear here are
+			 * superfluous.
+			 */
+			pte_clear(vma->vm_mm, address, _pte);
+			atomic_dec(&page->_mapcount);
+			spin_unlock(pte_ptl);
+		}
+	}
+	page_ref_sub(head, HPAGE_PMD_NR - 1);
+
+	pte_unmap(pte);
+	pgtable = pmd_pgtable(_pmd);
+
+	_pmd = mk_huge_pmd(head, vma->vm_page_prot);
+	_pmd = maybe_pmd_mkwrite(pmd_mkdirty(_pmd), vma);
+
+	/*
+	 * spin_lock() below is not the equivalent of smp_wmb(), so
+	 * this is needed to avoid the copy_huge_page writes to become
+	 * visible after the set_pmd_at() write.
+	 */
+	smp_wmb();
+
+	spin_lock(pmd_ptl);
+	BUG_ON(!pmd_none(*pmd));
+	pgtable_trans_huge_deposit(mm, pmd, pgtable);
+	set_pmd_at(mm, haddr, pmd, _pmd);
+	update_mmu_cache_pmd(vma, haddr, pmd);
+	atomic_inc(compound_mapcount_ptr(head));
+	__inc_node_page_state(head, NR_ANON_THPS);
+	spin_unlock(pmd_ptl);
+	unlock_page(head);
+	ret = 0;
+
+out_unlock:
+	anon_vma_unlock_write(vma->anon_vma);
+out:
+	return ret;
+}
+
 /* Racy check whether the huge page can be split */
 static bool can_promote_huge_page(struct page *page)
 {

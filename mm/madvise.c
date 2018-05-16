@@ -629,15 +629,16 @@ static long madvise_split_promote_hugepage(struct vm_area_struct *vma,
 		     unsigned long start, unsigned long end, int behavior)
 {
 	struct page *page;
+	unsigned long addr, haddr;
 	*prev = vma;
 
-	for (; start < end; start += HPAGE_PMD_SIZE) {
+	for (addr = start; addr < end; addr += HPAGE_PMD_SIZE) {
 		switch (behavior) {
 		case MADV_SPLITHUGEMAP:
-			split_huge_pmd_address(vma, start, false, NULL);
+			split_huge_pmd_address(vma, addr, false, NULL);
 			break;
 		case MADV_SPLITHUGEPAGE:
-			page = follow_page(vma, start, FOLL_GET);
+			page = follow_page(vma, addr, FOLL_GET);
 			if (page) {
 				lock_page(page);
 				if (split_huge_page(page))
@@ -645,6 +646,11 @@ static long madvise_split_promote_hugepage(struct vm_area_struct *vma,
 				unlock_page(page);
 				put_page(page);
 			}
+			break;
+		case MADV_PROMOTEHUGEMAP:
+			haddr = addr & HPAGE_PMD_MASK;
+			if (haddr >= start && (haddr + HPAGE_PMD_SIZE) <= end)
+				promote_huge_pmd_address(vma, haddr);
 			break;
 		default:
 			break;
