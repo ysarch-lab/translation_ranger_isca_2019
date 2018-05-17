@@ -652,6 +652,11 @@ static long madvise_split_promote_hugepage(struct vm_area_struct *vma,
 			if (haddr >= start && (haddr + HPAGE_PMD_SIZE) <= end)
 				promote_huge_pmd_address(vma, haddr);
 			break;
+		case MADV_PROMOTEHUGEPAGE:
+			haddr = addr & HPAGE_PMD_MASK;
+			if (haddr >= start && (haddr + HPAGE_PMD_SIZE) <= end)
+				promote_huge_page_address(vma, haddr);
+			break;
 		default:
 			break;
 		}

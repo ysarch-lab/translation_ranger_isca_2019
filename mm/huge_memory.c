@@ -4382,6 +4382,10 @@ static bool can_promote_huge_page(struct page *page)
 		extra_pins = PageSwapCache(page) ? 1 : 0;
 	else
 		return false;
+	if (PageSwapCache(page))
+		return false;
+	if (PageWriteback(page))
+		return false;
 	return total_mapcount(page) == page_count(page) - extra_pins - 1;
 }
 
@@ -4391,14 +4395,16 @@ static bool can_promote_huge_page(struct page *page)
  */
 
 static int __promote_huge_page_isolate(struct vm_area_struct *vma,
-					unsigned long address,
-					pte_t *pte)
+					unsigned long haddr, pte_t *pte,
+					struct page **head, struct list_head *subpage_list)
 {
 	struct page *page = NULL;
 	pte_t *_pte;
-	int none_or_zero = 0, referenced = 0;
+	int none_or_zero = 0;
 	bool writable = false;
+	unsigned long address = haddr;
 
+	lru_add_drain();
 	for (_pte = pte; _pte < pte+HPAGE_PMD_NR;
 	     _pte++, address += PAGE_SIZE) {
 		pte_t pteval = *_pte;
@@ -4419,8 +4425,14 @@ static int __promote_huge_page_isolate(struct vm_area_struct *vma,
 			goto out;
 		}
 
-		/* TODO: teach khugepaged to collapse THP mapped with pte */
+		if (address == haddr)
+			*head = page;
+
 		if (PageCompound(page)) {
+			goto out;
+		}
+
+		if (PageMlocked(page)) {
 			goto out;
 		}
 
@@ -4441,7 +4453,7 @@ static int __promote_huge_page_isolate(struct vm_area_struct *vma,
 		 * The page must only be referenced by the scanned process
 		 * and page swap cache.
 		 */
-		if (page_count(page) != 1 + PageSwapCache(page)) {
+		if (page_count(page) != page_mapcount(page) + PageSwapCache(page)) {
 			unlock_page(page);
 			goto out;
 		}
@@ -4467,21 +4479,17 @@ static int __promote_huge_page_isolate(struct vm_area_struct *vma,
 			unlock_page(page);
 			goto out;
 		}
+
 		inc_node_page_state(page,
 				NR_ISOLATED_ANON + page_is_file_cache(page));
 		VM_BUG_ON_PAGE(!PageLocked(page), page);
 		VM_BUG_ON_PAGE(PageLRU(page), page);
-
-		/* There should be enough young pte to collapse the page */
-		if (pte_young(pteval) ||
-		    page_is_young(page) || PageReferenced(page) ||
-		    mmu_notifier_test_young(vma->vm_mm, address))
-			referenced++;
 	}
 	if (likely(writable)) {
-		if (likely(referenced)) {
-			return 1;
-		}
+		int i;
+		for (i = 0; i < HPAGE_PMD_NR; i++)
+			list_add_tail(&(*head + i)->lru, subpage_list);
+		return 1;
 	} else {
 		/*result = SCAN_PAGE_RO;*/
 	}
@@ -4491,7 +4499,6 @@ out:
 	return 0;
 }
 
-#if 0
 /*
  * This function promotes normal pages into a huge page. @list point to all
  * subpages of huge page to promote, @head point to the head page.
@@ -4510,16 +4517,11 @@ out:
  */
 int promote_list_to_huge_page(struct page *head, struct list_head *list)
 {
-	struct pglist_data *pgdata = NODE_DATA(page_to_nid(head));
 	struct anon_vma *anon_vma = NULL;
-	int count, mapcount, extra_pins, ret;
-	bool mlocked;
-	unsigned long flags;
+	int ret = 0;
 	DECLARE_BITMAP(subpage_bitmap, HPAGE_PMD_NR);
 	struct page *subpage;
-
-	if (PageWriteback(head))
-		return -EBUSY;
+	int i;
 
 	/* no file-backed page support yet */
 	if (PageAnon(head)) {
@@ -4551,55 +4553,93 @@ int promote_list_to_huge_page(struct page *head, struct list_head *list)
 		goto out_unlock;
 	}
 
-	/* check __collapse_huge_page_isolate() for necessary checks */
-
-	freeze_page(head);
-	VM_BUG_ON_PAGE(compound_mapcount(head), head);
-
-	/* prevent PageLRU to go away from under us, and freeze lru stats */
-	spin_lock_irqsave(zone_lru_lock(page_zone(head)), flags);
-
-
-	/* Prevent deferred_split_scan() touching ->_refcount */
-	spin_lock(&pgdata->split_queue_lock);
-	count = page_count(head);
-	mapcount = total_mapcount(head);
-	if (!mapcount && page_ref_freeze(head, 1 + extra_pins)) {
-		if (!list_empty(page_deferred_list(head))) {
-			pgdata->split_queue_len--;
-			list_del(page_deferred_list(head));
-		}
-		spin_unlock(&pgdata->split_queue_lock);
-		__split_huge_page(head, list, flags);
-		if (PageSwapCache(head)) {
-			swp_entry_t entry = { .val = page_private(head) };
-
-			ret = split_swap_cluster(entry);
-		} else
-			ret = 0;
-	} else {
-		if (IS_ENABLED(CONFIG_DEBUG_VM) && mapcount) {
-			pr_alert("total_mapcount: %u, page_count(): %u\n",
-					mapcount, count);
-			if (PageTail(head))
-				dump_page(head, NULL);
-			dump_page(head, "total_mapcount(head) > 0");
-			BUG();
-		}
-		spin_unlock(&pgdata->split_queue_lock);
-fail:
-		spin_unlock_irqrestore(zone_lru_lock(page_zone(head)), flags);
-		unfreeze_page(head);
-		ret = -EBUSY;
+	/* Take care of migration wait list:
+	 * make compound page first, since it is impossible to move waiting
+	 * process from subpage queues to the head page queue.
+	 */
+	set_compound_page_dtor(head, COMPOUND_PAGE_DTOR);
+	set_compound_order(head, HPAGE_PMD_ORDER);
+	__SetPageHead(head);
+	for (i = 1; i < HPAGE_PMD_NR; i++) {
+		struct page *p = head + i;
+		p->index = 0;
+		p->mapping = TAIL_MAPPING;
+		p->mem_cgroup = NULL;
+		ClearPageActive(p);
+		/* move subpage refcount to head page */
+		page_ref_add(head, page_count(p) - 1);
+		set_page_count(p, 0);
+		unlock_page(p);
+		set_compound_head(p, head);
 	}
+	prep_transhuge_page(head);
+	atomic_set(compound_mapcount_ptr(head), -1);
 
+	if (!mem_cgroup_disabled())
+		mod_memcg_state(head->mem_cgroup, MEMCG_RSS_HUGE, HPAGE_PMD_NR);
+
+	INIT_LIST_HEAD(&head->lru);
+	unlock_page(head);
+	putback_lru_page(head);
+
+	mod_node_page_state(page_pgdat(head),
+			NR_ISOLATED_ANON + page_is_file_cache(head), -HPAGE_PMD_NR);
 out_unlock:
 	if (anon_vma) {
 		anon_vma_unlock_write(anon_vma);
 		put_anon_vma(anon_vma);
 	}
 out:
-	count_vm_event(!ret ? THP_SPLIT_PAGE : THP_SPLIT_PAGE_FAILED);
 	return ret;
 }
-#endif
+
+static int promote_huge_page_isolate(struct vm_area_struct *vma,
+					unsigned long haddr,
+					struct page **head, struct list_head *subpage_list)
+{
+	struct mm_struct *mm = vma->vm_mm;
+	pmd_t *pmd;
+	pte_t *pte;
+	spinlock_t *pte_ptl;
+	int ret = -EBUSY;
+
+	pmd = mm_find_pmd(mm, haddr);
+	if (!pmd || pmd_trans_huge(*pmd))
+		goto out;
+
+	anon_vma_lock_write(vma->anon_vma);
+
+	pte = pte_offset_map(pmd, haddr);
+	pte_ptl = pte_lockptr(mm, pmd);
+
+	spin_lock(pte_ptl);
+	ret = __promote_huge_page_isolate(vma, haddr, pte, head, subpage_list);
+	spin_unlock(pte_ptl);
+
+	if (unlikely(!ret)) {
+		pte_unmap(pte);
+		ret = -EBUSY;
+		goto out_unlock;
+	}
+	ret = 0;
+	/*
+	 * All pages are isolated and locked so anon_vma rmap
+	 * can't run anymore.
+	 */
+out_unlock:
+	anon_vma_unlock_write(vma->anon_vma);
+out:
+	return ret;
+}
+
+/* assume mmap_sem is down_write, wrapper for madvise */
+int promote_huge_page_address(struct vm_area_struct *vma, unsigned long haddr)
+{
+	LIST_HEAD(subpage_list);
+	struct page *head;
+
+	if (promote_huge_page_isolate(vma, haddr, &head, &subpage_list))
+		return -EBUSY;
+
+	return promote_list_to_huge_page(head, &subpage_list);
+}
