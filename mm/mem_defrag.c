@@ -777,15 +777,6 @@ retry_defrag:
 
 				count_vm_events(MEM_DEFRAG_DST_FREE_PAGES, 1<<scan_page_order);
 
-				if (!migrate_async_suitable(migratetype)) {
-					failed += 1;
-					defrag_stats->dst_free_failed += 1;
-
-					defrag_stats->not_defrag_vpn = scan_address + page_size;
-					goto quit_defrag;
-					continue;
-				}
-
 				/* lock page_zone(dest_page)->lock  */
 				spin_lock_irqsave(zone_lock, zone_lock_flags);
 
