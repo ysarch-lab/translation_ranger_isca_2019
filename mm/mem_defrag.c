@@ -1186,8 +1186,8 @@ insert_new_range: /* start_addr to end_addr  */
 			new_anchor_vpn = (scan_address - get_contig_page_size(anchor_page))>>PAGE_SHIFT;
 			new_anchor_pfn = page_to_pfn(anchor_page);
 
-			new_anchor_vpn &= (PUD_MASK>>PAGE_SHIFT);
-			new_anchor_pfn &= (PUD_MASK>>PAGE_SHIFT);
+			new_anchor_vpn &= (PMD_MASK>>PAGE_SHIFT);
+			new_anchor_pfn &= (PMD_MASK>>PAGE_SHIFT);
 
 			if (existing_anchor_pfn &&
 				existing_anchor_pfn == new_anchor_pfn) {
@@ -1426,7 +1426,7 @@ static int kmem_defragd_scan_mm(struct defrag_scan_control *sc)
 			} else if (sc->action == MEM_DEFRAG_DO_DEFRAG) {
 				/* go to nearest 2MB aligned address  */
 				unsigned long defrag_end = min_t(unsigned long,
-							(*scan_address + HPAGE_PUD_SIZE) & HPAGE_PUD_MASK,
+							(*scan_address + HPAGE_PMD_SIZE) & HPAGE_PMD_MASK,
 							vend);
 				int defrag_result;
 				/*bool found_anchor_page;*/
