@@ -49,6 +49,7 @@ struct defrag_result_stats {
 	unsigned long dst_file_failed;
 	unsigned long dst_misc_failed;
 	unsigned long not_defrag_vpn;
+	unsigned int aligned_max_order;
 };
 
 enum {
@@ -740,6 +741,8 @@ int defrag_address_range(struct mm_struct *mm, struct vm_area_struct *vma,
 		/* already in the contiguous pos  */
 		if (page_dist == (long long)(scan_page - anchor_page)) {
 			defrag_stats->aligned += (page_size/PAGE_SIZE);
+			defrag_stats->aligned_max_order = max(defrag_stats->aligned_max_order,
+				compound_order(scan_page));
 			continue;
 		} else { /* migrate pages according to the anchor pages in the vma.  */
 			struct page *dest_page = anchor_page + page_dist;
@@ -1506,6 +1509,23 @@ continue_defrag:
 						goto continue_defrag;
 					}
 				}
+
+				/* defrag works for the whole chunk, promote to THP in place */
+				if (!defrag_result &&
+					defrag_stats.aligned_max_order < HPAGE_PMD_ORDER && /* avoid existing THP */
+					!(*scan_address & (HPAGE_PMD_SIZE-1)) &&
+					!(defrag_end & (HPAGE_PMD_SIZE-1))) {
+					int ret = 0;
+					pr_debug("find a range to promote: [%lx, %lx)\n", *scan_address, defrag_end);
+					down_write(&mm->mmap_sem);
+					if (!(ret = promote_huge_page_address(vma, *scan_address))) {
+						pr_debug("promote huge page successful!\n");
+						if (!(ret = promote_huge_pmd_address(vma, *scan_address)))
+							pr_debug("2MB THP created!\n");
+					}
+					up_write(&mm->mmap_sem);
+				}
+
 				*scan_address = defrag_end;
 				scanned_chunks++;
 				if (num_breakout_chunks && scanned_chunks >= num_breakout_chunks) {
