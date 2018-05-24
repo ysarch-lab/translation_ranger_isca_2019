@@ -4643,3 +4643,142 @@ int promote_huge_page_address(struct vm_area_struct *vma, unsigned long haddr)
 
 	return promote_list_to_huge_page(head, &subpage_list);
 }
+
+static pud_t *mm_find_pud(struct mm_struct *mm, unsigned long address)
+{
+	pgd_t *pgd;
+	p4d_t *p4d;
+	pud_t *pud = NULL;
+	pud_t pude;
+
+	pgd = pgd_offset(mm, address);
+	if (!pgd_present(*pgd))
+		goto out;
+
+	p4d = p4d_offset(pgd, address);
+	if (!p4d_present(*p4d))
+		goto out;
+
+	pud = pud_offset(p4d, address);
+
+	pude = *pud;
+	barrier();
+	if (!pud_present(pude) || pud_trans_huge(pude))
+		pud = NULL;
+out:
+	return pud;
+}
+
+/* promote HPAGE_PUD_SIZE range into a PUD map.
+ * mmap_sem needs to be down_write.
+ * */
+int promote_huge_pud_address(struct vm_area_struct *vma, unsigned long haddr)
+{
+	struct mm_struct *mm = vma->vm_mm;
+	pud_t *pud, _pud;
+	pmd_t *pmd, *_pmd;
+	spinlock_t *pud_ptl, *pmd_ptl;
+	unsigned long mmun_start, mmun_end;
+	pgtable_t pgtable;
+	struct page *page, *head;
+	unsigned long address = haddr;
+	int ret = -EBUSY;
+
+	VM_BUG_ON(haddr & ~HPAGE_PUD_MASK);
+
+	pud = mm_find_pud(mm, haddr);
+	if (!pud)
+		goto out;
+
+	anon_vma_lock_write(vma->anon_vma);
+
+	pmd = pmd_offset(pud, haddr);
+	pmd_ptl = pmd_lockptr(mm, pmd);
+
+	head = page = vm_normal_page_pmd(vma, haddr, *pmd);
+	if (!page || !PageTransCompound(page) ||
+		compound_order(page) != HPAGE_PUD_ORDER)
+		goto out_unlock;
+	VM_BUG_ON(head != compound_head(page));
+	lock_page(head);
+
+	mmun_start = haddr;
+	mmun_end   = haddr + HPAGE_PUD_SIZE;
+	mmu_notifier_invalidate_range_start(mm, mmun_start, mmun_end);
+	pud_ptl = pud_lock(mm, pud);
+	/*
+	 * After this gup_fast can't run anymore. This also removes
+	 * any huge TLB entry from the CPU so we won't allow
+	 * huge and small TLB entries for the same virtual address
+	 * to avoid the risk of CPU bugs in that area.
+	 */
+
+	_pud = pudp_collapse_flush(vma, haddr, pud);
+	spin_unlock(pud_ptl);
+	mmu_notifier_invalidate_range_end(mm, mmun_start, mmun_end);
+
+	/* remove ptes */
+	for (_pmd = pmd; _pmd < pmd + (1<<(HPAGE_PUD_ORDER-HPAGE_PMD_ORDER));
+				_pmd++, page += HPAGE_PMD_NR, address += HPAGE_PMD_SIZE) {
+		pmd_t pmdval = *_pmd;
+
+		if (pmd_none(pmdval) || is_zero_pfn(pmd_pfn(pmdval))) {
+			if (is_zero_pfn(pmd_pfn(pmdval))) {
+				/*
+				 * ptl mostly unnecessary.
+				 */
+				spin_lock(pmd_ptl);
+				/*
+				 * paravirt calls inside pte_clear here are
+				 * superfluous.
+				 */
+				pmd_clear(_pmd);
+				spin_unlock(pmd_ptl);
+			}
+		} else {
+			/*
+			 * ptl mostly unnecessary, but preempt has to
+			 * be disabled to update the per-cpu stats
+			 * inside page_remove_rmap().
+			 */
+			spin_lock(pmd_ptl);
+			/*
+			 * paravirt calls inside pte_clear here are
+			 * superfluous.
+			 */
+			pmd_clear(_pmd);
+			atomic_dec(sub_compound_mapcount_ptr(page, 1));
+			__dec_node_page_state(page, NR_ANON_THPS);
+			spin_unlock(pmd_ptl);
+		}
+	}
+	page_ref_sub(head, (1<<(HPAGE_PUD_ORDER-HPAGE_PMD_ORDER)) - 1);
+
+	pgtable = pud_pgtable(_pud);
+
+	_pud = mk_huge_pud(head, vma->vm_page_prot);
+	_pud = maybe_pud_mkwrite(pud_mkdirty(_pud), vma);
+
+	/*
+	 * spin_lock() below is not the equivalent of smp_wmb(), so
+	 * this is needed to avoid the copy_huge_page writes to become
+	 * visible after the set_pmd_at() write.
+	 */
+	smp_wmb();
+
+	spin_lock(pud_ptl);
+	BUG_ON(!pud_none(*pud));
+	pgtable_trans_huge_pud_deposit(mm, pud, pgtable);
+	set_pud_at(mm, haddr, pud, _pud);
+	update_mmu_cache_pud(vma, haddr, pud);
+	__inc_node_page_state(head, NR_ANON_THPS_PUD);
+	atomic_inc(compound_mapcount_ptr(head));
+	spin_unlock(pud_ptl);
+	unlock_page(head);
+	ret = 0;
+
+out_unlock:
+	anon_vma_unlock_write(vma->anon_vma);
+out:
+	return ret;
+}

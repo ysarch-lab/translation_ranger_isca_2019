@@ -265,4 +265,24 @@ pmd_t pmdp_collapse_flush(struct vm_area_struct *vma, unsigned long address,
 	return pmd;
 }
 #endif
+
+#ifndef pudp_collapse_flush
+pud_t pudp_collapse_flush(struct vm_area_struct *vma, unsigned long address,
+			  pud_t *pudp)
+{
+	/*
+	 * pud and hugepage pte format are same. So we could
+	 * use the same function.
+	 */
+	pud_t pud;
+
+	VM_BUG_ON(address & ~HPAGE_PUD_MASK);
+	VM_BUG_ON(pud_trans_huge(*pudp));
+	pud = pudp_huge_get_and_clear(vma->vm_mm, address, pudp);
+
+	/* collapse entails shooting down ptes not pmd */
+	flush_tlb_range(vma, address, address + HPAGE_PUD_SIZE);
+	return pud;
+}
+#endif
 #endif /* CONFIG_TRANSPARENT_HUGEPAGE */

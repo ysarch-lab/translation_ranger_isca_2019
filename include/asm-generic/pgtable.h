@@ -302,6 +302,8 @@ static inline void pudp_set_wrprotect(struct mm_struct *mm,
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
 extern pmd_t pmdp_collapse_flush(struct vm_area_struct *vma,
 				 unsigned long address, pmd_t *pmdp);
+extern pud_t pudp_collapse_flush(struct vm_area_struct *vma,
+				 unsigned long address, pud_t *pudp);
 #else
 static inline pmd_t pmdp_collapse_flush(struct vm_area_struct *vma,
 					unsigned long address,
@@ -310,7 +312,15 @@ static inline pmd_t pmdp_collapse_flush(struct vm_area_struct *vma,
 	BUILD_BUG();
 	return *pmdp;
 }
+static inline pud_t pudp_collapse_flush(struct vm_area_struct *vma,
+					unsigned long address,
+					pud_t *pudp)
+{
+	BUILD_BUG();
+	return *pudp;
+}
 #define pmdp_collapse_flush pmdp_collapse_flush
+#define pudp_collapse_flush pudp_collapse_flush
 #endif /* CONFIG_TRANSPARENT_HUGEPAGE */
 #endif
 

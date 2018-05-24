@@ -112,6 +112,8 @@ static inline void pud_populate_with_pgtable(struct mm_struct *mm, pud_t *pud,
 	set_pud(pud, __pud(((pteval_t)pfn << PAGE_SHIFT) | _PAGE_TABLE));
 }
 
+#define pud_pgtable(pud) pud_page(pud)
+
 #if CONFIG_PGTABLE_LEVELS > 2
 static inline pmd_t *pmd_alloc_one(struct mm_struct *mm, unsigned long addr)
 {
