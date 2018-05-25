@@ -2983,7 +2983,7 @@ static void __split_huge_pud_page_tail(struct page *head, int tail,
 
 	VM_BUG_ON_PAGE(page_ref_count(page_tail) != 0, page_tail);
 
-	atomic_set(sub_compound_mapcount_ptr(page_tail, 1), -1);
+	/*atomic_set(sub_compound_mapcount_ptr(page_tail, 1), -1);*/
 
 	clear_compound_head(page_tail);
 	prep_compound_page(page_tail, HPAGE_PMD_ORDER);
@@ -3077,7 +3077,8 @@ static void __split_huge_pud_page(struct page *page, struct list_head *list,
 		}
 	}
 	/* reset head page order  */
-	set_compound_order(head, HPAGE_PMD_ORDER);
+	prep_compound_page(head, HPAGE_PMD_ORDER);
+	prep_transhuge_page(head);
 
 	/* See comment in __split_huge_page_tail() */
 	if (PageAnon(head)) {

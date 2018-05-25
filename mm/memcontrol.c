@@ -2415,7 +2415,7 @@ void mem_cgroup_split_huge_pud_fixup(struct page *head)
 	for (i = HPAGE_PMD_NR; i < HPAGE_PUD_NR; i += HPAGE_PMD_NR)
 		head[i].mem_cgroup = head->mem_cgroup;
 
-	__mod_memcg_state(head->mem_cgroup, MEMCG_RSS_HUGE, -HPAGE_PUD_NR);
+	/*__mod_memcg_state(head->mem_cgroup, MEMCG_RSS_HUGE, -HPAGE_PUD_NR);*/
 }
 #endif /* CONFIG_TRANSPARENT_HUGEPAGE */
 
