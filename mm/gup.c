@@ -332,17 +332,20 @@ static struct page *follow_pud_mask(struct vm_area_struct *vma,
 		if (page)
 			return page;
 	}
-	if (unlikely(pud_bad(*pud)))
-		return no_page_table(vma, flags);
 
 #ifdef CONFIG_HAVE_ARCH_TRANSPARENT_HUGEPAGE_PUD
-	if (likely(!pud_trans_huge(*pud)))
+	if (likely(!pud_trans_huge(*pud))) {
+		if (unlikely(pud_bad(*pud)))
+			return no_page_table(vma, flags);
 		return follow_pmd_mask(vma, address, pud, flags, page_mask);
+	}
 
 	ptl = pud_lock(mm, pud);
 
 	if (unlikely(!pud_trans_huge(*pud))) {
 		spin_unlock(ptl);
+		if (unlikely(pud_bad(*pud)))
+			return no_page_table(vma, flags);
 		return follow_pmd_mask(vma, address, pud, flags, page_mask);
 	}
 
@@ -387,6 +390,8 @@ out:
 	*page_mask = HPAGE_PUD_NR - 1;
 	return page;
 #else
+	if (unlikely(pud_bad(*pud)))
+		return no_page_table(vma, flags);
 	return follow_pmd_mask(vma, address, pud, flags, page_mask);
 #endif
 }
