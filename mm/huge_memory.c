@@ -4830,6 +4830,7 @@ static int __promote_huge_pud_page_isolate(struct vm_area_struct *vma,
 					struct page **head, struct list_head *subpage_list)
 {
 	struct page *page = NULL;
+	struct pglist_data *pgdata = NULL;
 	pmd_t *_pmd;
 	int none_or_zero = 0;
 	bool writable = false;
@@ -4919,8 +4920,20 @@ static int __promote_huge_pud_page_isolate(struct vm_area_struct *vma,
 	}
 	if (likely(writable)) {
 		int i;
-		for (i = 0; i < HPAGE_PUD_NR; i += HPAGE_PMD_NR)
-			list_add_tail(&(*head + i)->lru, subpage_list);
+		unsigned long flags;
+
+		pgdata = NODE_DATA(page_to_nid(page));
+		spin_lock_irqsave(&pgdata->split_queue_lock, flags);
+		for (i = 0; i < HPAGE_PUD_NR; i += HPAGE_PMD_NR) {
+			struct page *p = *head + i;
+
+			if (!list_empty(page_deferred_list(p))) {
+				pgdata->split_queue_len--;
+				list_del(page_deferred_list(p));
+			}
+			list_add_tail(&p->lru, subpage_list);
+		}
+		spin_unlock_irqrestore(&pgdata->split_queue_lock, flags);
 		return 1;
 	} else {
 		/*result = SCAN_PAGE_RO;*/
