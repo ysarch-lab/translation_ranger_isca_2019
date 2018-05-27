@@ -720,8 +720,13 @@ int defrag_address_range(struct mm_struct *mm, struct vm_area_struct *vma,
 
 		/* PTE-mapped THP not allowed  */
 		if ((scan_page == compound_head(scan_page)) &&
-			PageTransHuge(scan_page) && !PageHuge(scan_page))
+			PageTransHuge(scan_page) && !PageHuge(scan_page)) {
+			if (compound_order(scan_page) == HPAGE_PUD_ORDER) {
+				defrag_stats->aligned_max_order = HPAGE_PUD_ORDER;
+				goto quit_defrag;
+			}
 			src_thp = true;
+		}
 
 		/* Allow THPs  */
 		if (PageCompound(scan_page) && !src_thp) {
@@ -896,8 +901,13 @@ freepage_isolate_fail:
 
 				/* PTE-mapped THP not allowed  */
 				if ((dest_page == compound_head(dest_page)) &&
-					PageTransHuge(dest_page) && !PageHuge(dest_page))
+					PageTransHuge(dest_page) && !PageHuge(dest_page)) {
+					if (compound_order(dest_page) == HPAGE_PUD_ORDER) {
+						defrag_stats->aligned_max_order = HPAGE_PUD_ORDER;
+						goto quit_defrag;
+					}
 					dst_thp = true;
+				}
 
 				if (PageCompound(dest_page) && !dst_thp) {
 					failed += get_contig_page_size(dest_page);
@@ -1180,8 +1190,8 @@ insert_new_range: /* start_addr to end_addr  */
 			new_anchor_vpn = (scan_address - get_contig_page_size(anchor_page))>>PAGE_SHIFT;
 			new_anchor_pfn = page_to_pfn(anchor_page);
 
-			new_anchor_vpn &= (PMD_MASK>>PAGE_SHIFT);
-			new_anchor_pfn &= (PMD_MASK>>PAGE_SHIFT);
+			new_anchor_vpn &= (PUD_MASK>>PAGE_SHIFT);
+			new_anchor_pfn &= (PUD_MASK>>PAGE_SHIFT);
 
 			if (existing_anchor_pfn &&
 				existing_anchor_pfn == new_anchor_pfn) {
@@ -1420,7 +1430,7 @@ static int kmem_defragd_scan_mm(struct defrag_scan_control *sc)
 			} else if (sc->action == MEM_DEFRAG_DO_DEFRAG) {
 				/* go to nearest 2MB aligned address  */
 				unsigned long defrag_end = min_t(unsigned long,
-							(*scan_address + HPAGE_PMD_SIZE) & HPAGE_PMD_MASK,
+							(*scan_address + HPAGE_PUD_SIZE) & HPAGE_PUD_MASK,
 							vend);
 				int defrag_result;
 				/*bool found_anchor_page;*/
@@ -1503,16 +1513,16 @@ continue_defrag:
 
 				/* defrag works for the whole chunk, promote to THP in place */
 				if (!defrag_result &&
-					defrag_stats.aligned_max_order < HPAGE_PMD_ORDER && /* avoid existing THP */
-					!(*scan_address & (HPAGE_PMD_SIZE-1)) &&
-					!(defrag_end & (HPAGE_PMD_SIZE-1))) {
+					defrag_stats.aligned_max_order < HPAGE_PUD_ORDER && /* avoid existing THP */
+					!(*scan_address & (HPAGE_PUD_SIZE-1)) &&
+					!(defrag_end & (HPAGE_PUD_SIZE-1))) {
 					int ret = 0;
 					pr_debug("find a range to promote: [%lx, %lx)\n", *scan_address, defrag_end);
 					down_write(&mm->mmap_sem);
-					if (!(ret = promote_huge_page_address(vma, *scan_address))) {
-						pr_debug("promote huge page successful!\n");
-						if (!(ret = promote_huge_pmd_address(vma, *scan_address)))
-							pr_debug("2MB THP created!\n");
+					if (!(ret = promote_huge_pud_page_address(vma, *scan_address))) {
+						pr_debug("promote huge pud page successful!\n");
+						if (!(ret = promote_huge_pud_address(vma, *scan_address)))
+							pr_debug("1GB THP created!\n");
 					}
 					up_write(&mm->mmap_sem);
 				}
