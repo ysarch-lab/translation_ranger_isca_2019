@@ -2850,7 +2850,9 @@ static void __split_huge_pud_locked(struct vm_area_struct *vma, pud_t *pud,
 		BUG_ON(!pmd_none(*pmd));
 		set_pmd_at(mm, addr, pmd, entry);
 		/* distinguish between pud compound_mapcount and pmd compound_mapcount */
-		atomic_inc(sub_compound_mapcount_ptr(&page[i], 1));
+		if (atomic_inc_and_test(sub_compound_mapcount_ptr(&page[i], 1)))
+			/* first pmd-mapped pud page */
+			__inc_node_page_state(page, NR_ANON_THPS);
 		pr_debug("page: %px pfn: %lx: sub_compound_mapcount: %d\n",
 				&page[i], page_to_pfn(&page[i]), sub_compound_mapcount(&page[i]));
 	}

@@ -1182,11 +1182,12 @@ void page_add_new_anon_rmap(struct page *page,
 		VM_BUG_ON_PAGE(!PageTransHuge(page), page);
 		/* increment count (starts at -1) */
 		atomic_set(compound_mapcount_ptr(page), 0);
-		if (compound_order(page) == HPAGE_PUD_ORDER) {
-			VM_BUG_ON(order == HPAGE_PMD_ORDER);
+		if (order == HPAGE_PUD_ORDER) {
+			VM_BUG_ON(compound_order(page) != HPAGE_PUD_ORDER);
 			/* Anon THP always mapped first with PMD */
 			__inc_node_page_state(page, NR_ANON_THPS_PUD);
-		} else if (compound_order(page) == HPAGE_PMD_ORDER) {
+		} else if (order == HPAGE_PMD_ORDER) {
+			VM_BUG_ON(compound_order(page) != HPAGE_PMD_ORDER);
 			__inc_node_page_state(page, NR_ANON_THPS);
 		} else
 			VM_BUG_ON(1);
@@ -1298,6 +1299,7 @@ static void page_remove_anon_compound_rmap(struct page *page, int order)
 							nr++;
 					}
 				}
+				__dec_node_page_state(page, NR_ANON_THPS);
 			}
 			nr += HPAGE_PMD_NR;
 			__mod_node_page_state(page_pgdat(head), NR_ANON_MAPPED, -nr);
@@ -1320,11 +1322,14 @@ static void page_remove_anon_compound_rmap(struct page *page, int order)
 	if (!IS_ENABLED(CONFIG_TRANSPARENT_HUGEPAGE))
 		return;
 
-	if (hpage_nr_pages(head) == HPAGE_PMD_NR)
+	if (order == HPAGE_PMD_ORDER)
 		__dec_node_page_state(page, NR_ANON_THPS);
-	else
+	else if (order == HPAGE_PUD_ORDER)
 		__dec_node_page_state(page, NR_ANON_THPS_PUD);
+	else
+		VM_BUG_ON(1);
 
+	/* PMD-mapped PUD THP is handled above */
 	if (TestClearPagePUDDoubleMap(head)) {
 		VM_BUG_ON(!(compound_order(head) == HPAGE_PUD_ORDER || head == page));
 		/*
