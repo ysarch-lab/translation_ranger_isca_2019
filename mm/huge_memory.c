@@ -5007,6 +5007,7 @@ int promote_list_to_huge_pud_page(struct page *head, struct list_head *list)
 	DECLARE_BITMAP(subpage_bitmap, HPAGE_PMD_NR);
 	struct page *subpage;
 	int i;
+	int first_compound_mapcount = 0;
 
 	/* no file-backed page support yet */
 	if (PageAnon(head)) {
@@ -5038,6 +5039,7 @@ int promote_list_to_huge_pud_page(struct page *head, struct list_head *list)
 		goto out_unlock;
 	}
 
+	first_compound_mapcount = compound_mapcount(head);
 	/* Take care of migration wait list:
 	 * make compound page first, since it is impossible to move waiting
 	 * process from subpage queues to the head page queue.
@@ -5048,7 +5050,9 @@ int promote_list_to_huge_pud_page(struct page *head, struct list_head *list)
 	for (i = 1; i < HPAGE_PUD_NR; i++) {
 		struct page *p = head + i;
 		p->index = 0;
-		p->mapping = TAIL_MAPPING;
+		/* avoid overwriting sub_compound_mapcount */
+		if (i % HPAGE_PMD_NR != 3)
+			p->mapping = TAIL_MAPPING;
 		p->mem_cgroup = NULL;
 		ClearPageActive(p);
 		/* move subpage refcount to head page */
@@ -5057,6 +5061,7 @@ int promote_list_to_huge_pud_page(struct page *head, struct list_head *list)
 			/*atomic_set(sub_compound_mapcount_ptr(p, 1),*/
 			atomic_set(&p[2+1].compound_mapcount,
 				compound_mapcount(p) - 1);
+			/* will be set to TAIL_MAPPING in next iteration */
 			atomic_set(compound_mapcount_ptr(p), 0);
 			ClearPageCompound(p);
 			set_compound_page_dtor(p, NULL_COMPOUND_DTOR);
@@ -5066,6 +5071,8 @@ int promote_list_to_huge_pud_page(struct page *head, struct list_head *list)
 		set_compound_head(p, head);
 	}
 	prep_transhuge_page(head);
+	/* Set first PMD-mapped page sub_compound_mapcount */
+	atomic_set(sub_compound_mapcount_ptr(head, 1), first_compound_mapcount - 1);
 	atomic_set(compound_mapcount_ptr(head), -1);
 
 	INIT_LIST_HEAD(&head->lru);
