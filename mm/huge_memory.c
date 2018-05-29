@@ -4409,6 +4409,7 @@ static int __promote_huge_page_isolate(struct vm_area_struct *vma,
 	bool writable = false;
 	unsigned long address = haddr;
 
+	*head = NULL;
 	lru_add_drain();
 	for (_pte = pte; _pte < pte+HPAGE_PMD_NR;
 	     _pte++, address += PAGE_SIZE) {
@@ -4432,6 +4433,9 @@ static int __promote_huge_page_isolate(struct vm_area_struct *vma,
 
 		if (address == haddr)
 			*head = page;
+
+		if ((*head + (address - haddr)/PAGE_SIZE) != page)
+			goto out;
 
 		if (PageCompound(page)) {
 			goto out;
@@ -4844,6 +4848,8 @@ static int __promote_huge_pud_page_isolate(struct vm_area_struct *vma,
 	bool writable = false;
 	unsigned long address = haddr;
 
+	*head = NULL;
+
 	lru_add_drain();
 	for (_pmd = pmd; _pmd < pmd+PTRS_PER_PMD;
 	     _pmd++, address += HPAGE_PMD_SIZE) {
@@ -4867,6 +4873,9 @@ static int __promote_huge_pud_page_isolate(struct vm_area_struct *vma,
 
 		if (address == haddr)
 			*head = page;
+
+		if ((*head + (address - haddr)/PAGE_SIZE) != page)
+			goto out;
 
 		if (!PageCompound(page) || compound_order(page) != HPAGE_PMD_ORDER) {
 			goto out;
