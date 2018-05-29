@@ -1256,6 +1256,8 @@ const char * const vmstat_text[] = {
 	"thp_split_page_failed",
 	"thp_deferred_split_page",
 	"thp_split_pmd",
+	"thp_promote_pmd",
+	"thp_promote_page",
 #ifdef CONFIG_HAVE_ARCH_TRANSPARENT_HUGEPAGE_PUD
 	"thp_fault_alloc_pud",
 	"thp_fault_fallback_pud",
@@ -1264,6 +1266,8 @@ const char * const vmstat_text[] = {
 	"thp_split_pud_page_failed",
 	"thp_zero_pud_page_alloc",
 	"thp_zero_pud_page_alloc_failed",
+	"thp_promote_pud",
+	"thp_promote_pud_page",
 #endif
 	"thp_zero_page_alloc",
 	"thp_zero_page_alloc_failed",

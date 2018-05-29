@@ -4372,6 +4372,8 @@ int promote_huge_pmd_address(struct vm_area_struct *vma, unsigned long haddr)
 out_unlock:
 	anon_vma_unlock_write(vma->anon_vma);
 out:
+	if (!ret)
+		count_vm_event(THP_PROMOTE_PMD);
 	return ret;
 }
 
@@ -4593,6 +4595,8 @@ out_unlock:
 		put_anon_vma(anon_vma);
 	}
 out:
+	if (!ret)
+		count_vm_event(THP_PROMOTE_PAGE);
 	return ret;
 }
 
@@ -4783,6 +4787,8 @@ int promote_huge_pud_address(struct vm_area_struct *vma, unsigned long haddr)
 out_unlock:
 	anon_vma_unlock_write(vma->anon_vma);
 out:
+	if (!ret)
+		count_vm_event(THP_PROMOTE_PUD);
 	return ret;
 }
 
@@ -5087,6 +5093,8 @@ out_unlock:
 		put_anon_vma(anon_vma);
 	}
 out:
+	if (!ret)
+		count_vm_event(THP_PROMOTE_PUD_PAGE);
 	return ret;
 }
 
