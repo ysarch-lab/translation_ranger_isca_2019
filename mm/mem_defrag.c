@@ -62,6 +62,7 @@ int vma_scan_percentile = 100;
 int vma_scan_threshold_type = VMA_THRESHOLD_TYPE_TIME;
 int vma_no_repeat_defrag = 0;
 int kmem_defragd_always;
+int mem_defrag_promote_1gb_thp = 0;
 static DEFINE_SPINLOCK(kmem_defragd_mm_lock);
 
 #define MM_SLOTS_HASH_BITS 10
@@ -1521,7 +1522,7 @@ continue_defrag:
 					down_write(&mm->mmap_sem);
 					if (!(ret = promote_huge_pud_page_address(vma, *scan_address))) {
 						pr_debug("promote huge pud page successful!\n");
-						if (!(ret = promote_huge_pud_address(vma, *scan_address)))
+						if (mem_defrag_promote_1gb_thp && !(ret = promote_huge_pud_address(vma, *scan_address)))
 							pr_debug("1GB THP created!\n");
 					}
 					up_write(&mm->mmap_sem);

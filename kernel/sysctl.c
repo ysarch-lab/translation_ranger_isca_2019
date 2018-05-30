@@ -120,6 +120,7 @@ extern int vma_scan_threshold_type;
 extern int vma_no_repeat_defrag;
 extern int num_breakout_chunks;
 extern int khugepaged_daemon;
+extern int mem_defrag_promote_1gb_thp;
 
 extern int only_print_head_pfn;
 
@@ -1716,6 +1717,15 @@ static struct ctl_table vm_table[] = {
 		.procname	= "only_print_head_pfn",
 		.data		= &only_print_head_pfn,
 		.maxlen		= sizeof(only_print_head_pfn),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &zero,
+		.extra2		= &one,
+	},
+	{
+		.procname	= "mem_defrag_promote_1gb_thp",
+		.data		= &mem_defrag_promote_1gb_thp,
+		.maxlen		= sizeof(mem_defrag_promote_1gb_thp),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_minmax,
 		.extra1		= &zero,
