@@ -4405,7 +4405,6 @@ static int __promote_huge_page_isolate(struct vm_area_struct *vma,
 {
 	struct page *page = NULL;
 	pte_t *_pte;
-	int none_or_zero = 0;
 	bool writable = false;
 	unsigned long address = haddr;
 
@@ -4415,14 +4414,8 @@ static int __promote_huge_page_isolate(struct vm_area_struct *vma,
 	     _pte++, address += PAGE_SIZE) {
 		pte_t pteval = *_pte;
 		if (pte_none(pteval) || (pte_present(pteval) &&
-				is_zero_pfn(pte_pfn(pteval)))) {
-			if (!userfaultfd_armed(vma) &&
-			    ++none_or_zero <= HPAGE_PMD_NR) {
-				continue;
-			} else {
-				goto out;
-			}
-		}
+				is_zero_pfn(pte_pfn(pteval))))
+			goto out;
 		if (!pte_present(pteval)) {
 			goto out;
 		}
@@ -4496,8 +4489,11 @@ static int __promote_huge_page_isolate(struct vm_area_struct *vma,
 	}
 	if (likely(writable)) {
 		int i;
-		for (i = 0; i < HPAGE_PMD_NR; i++)
-			list_add_tail(&(*head + i)->lru, subpage_list);
+		for (i = 0; i < HPAGE_PMD_NR; i++) {
+			struct page *p = *head + i;
+			list_add_tail(&p->lru, subpage_list);
+			VM_BUG_ON_PAGE(!PageLocked(p), p);
+		}
 		return 1;
 	} else {
 		/*result = SCAN_PAGE_RO;*/
@@ -4844,7 +4840,6 @@ static int __promote_huge_pud_page_isolate(struct vm_area_struct *vma,
 	struct page *page = NULL;
 	struct pglist_data *pgdata = NULL;
 	pmd_t *_pmd;
-	int none_or_zero = 0;
 	bool writable = false;
 	unsigned long address = haddr;
 
@@ -4855,14 +4850,8 @@ static int __promote_huge_pud_page_isolate(struct vm_area_struct *vma,
 	     _pmd++, address += HPAGE_PMD_SIZE) {
 		pmd_t pmdval = *_pmd;
 		if (pmd_none(pmdval) || (pmd_trans_huge(pmdval) &&
-				is_zero_pfn(pmd_pfn(pmdval)))) {
-			if (!userfaultfd_armed(vma) &&
-			    ++none_or_zero <= HPAGE_PMD_NR) {
-				continue;
-			} else {
-				goto out;
-			}
-		}
+				is_zero_pfn(pmd_pfn(pmdval))))
+			goto out;
 		if (!pmd_present(pmdval)) {
 			goto out;
 		}
@@ -4947,8 +4936,10 @@ static int __promote_huge_pud_page_isolate(struct vm_area_struct *vma,
 			if (!list_empty(page_deferred_list(p))) {
 				pgdata->split_queue_len--;
 				list_del(page_deferred_list(p));
+				INIT_LIST_HEAD(page_deferred_list(p));
 			}
 			list_add_tail(&p->lru, subpage_list);
+			VM_BUG_ON_PAGE(!PageLocked(p), p);
 		}
 		spin_unlock_irqrestore(&pgdata->split_queue_lock, flags);
 		return 1;
@@ -4978,6 +4969,8 @@ static int promote_huge_pud_page_isolate(struct vm_area_struct *vma,
 	anon_vma_lock_write(vma->anon_vma);
 
 	pmd = pmd_offset(pud, haddr);
+	if (!pmd)
+		goto out_unlock;
 	pmd_ptl = pmd_lockptr(mm, pmd);
 
 	spin_lock(pmd_ptl);
@@ -5040,8 +5033,10 @@ int promote_list_to_huge_pud_page(struct page *head, struct list_head *list)
 			goto out;
 		}
 		anon_vma_lock_write(anon_vma);
-	} else
-		return -EBUSY;
+	} else {
+		ret = -EBUSY;
+		goto out;
+	}
 
 	/* Racy check each subpage to see if any has extra pin */
 	list_for_each_entry(subpage, list, lru) {
@@ -5062,6 +5057,7 @@ int promote_list_to_huge_pud_page(struct page *head, struct list_head *list)
 	set_compound_page_dtor(head, COMPOUND_PAGE_DTOR);
 	set_compound_order(head, HPAGE_PUD_ORDER);
 	__SetPageHead(head);
+	list_del(&head->lru);
 	for (i = 1; i < HPAGE_PUD_NR; i++) {
 		struct page *p = head + i;
 		p->index = 0;
@@ -5072,6 +5068,7 @@ int promote_list_to_huge_pud_page(struct page *head, struct list_head *list)
 		ClearPageActive(p);
 		/* move subpage refcount to head page */
 		if (i % HPAGE_PMD_NR == 0) {
+			list_del(&p->lru);
 			page_ref_add(head, page_count(p) - 1);
 			/*atomic_set(sub_compound_mapcount_ptr(p, 1),*/
 			atomic_set(&p[2+1].compound_mapcount,
@@ -5090,7 +5087,6 @@ int promote_list_to_huge_pud_page(struct page *head, struct list_head *list)
 	atomic_set(sub_compound_mapcount_ptr(head, 1), first_compound_mapcount - 1);
 	atomic_set(compound_mapcount_ptr(head), -1);
 
-	INIT_LIST_HEAD(&head->lru);
 	unlock_page(head);
 	putback_lru_page(head);
 
@@ -5102,6 +5098,12 @@ out_unlock:
 		put_anon_vma(anon_vma);
 	}
 out:
+	while (!list_empty(list)) {
+		struct page *p = list_first_entry(list, struct page, lru);
+		list_del(&p->lru);
+		unlock_page(p);
+		putback_lru_page(p);
+	}
 	if (!ret)
 		count_vm_event(THP_PROMOTE_PUD_PAGE);
 	return ret;
@@ -5112,6 +5114,9 @@ int promote_huge_pud_page_address(struct vm_area_struct *vma, unsigned long hadd
 {
 	LIST_HEAD(subpage_list);
 	struct page *head;
+
+	if (haddr & (HPAGE_PUD_SIZE - 1))
+		return -EINVAL;
 
 	if (promote_huge_pud_page_isolate(vma, haddr, &head, &subpage_list))
 		return -EBUSY;
