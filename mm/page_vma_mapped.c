@@ -30,6 +30,22 @@ static bool map_pte(struct page_vma_mapped_walk *pvmw)
 	return true;
 }
 
+static bool map_pmd(struct page_vma_mapped_walk *pvmw)
+{
+	pmd_t pmde;
+
+	pvmw->pmd = pmd_offset(pvmw->pud, pvmw->address);
+	pmde = READ_ONCE(*pvmw->pmd);
+	if (pmd_trans_huge(pmde) || is_pmd_migration_entry(pmde)) {
+		pvmw->ptl = pmd_lock(pvmw->vma->vm_mm, pvmw->pmd);
+		return true;
+	} else if (!pmd_present(pmde))
+		return false;
+
+	pvmw->ptl = pmd_lock(pvmw->vma->vm_mm, pvmw->pmd);
+	return true;
+}
+
 static inline bool pfn_in_hpage(struct page *hpage, unsigned long pfn)
 {
 	unsigned long hpage_pfn = page_to_pfn(hpage);
@@ -89,6 +105,38 @@ static bool check_pte(struct page_vma_mapped_walk *pvmw)
 	return pfn_in_hpage(pvmw->page, pfn);
 }
 
+/* 0: not mapped, 1: pmd_page, 2: pmd  */
+static int check_pmd(struct page_vma_mapped_walk *pvmw)
+{
+	unsigned long pfn;
+
+	if (likely(pmd_trans_huge(*pvmw->pmd))) {
+		if (pvmw->flags & PVMW_MIGRATION)
+			return 0;
+		pfn = pmd_pfn(*pvmw->pmd);
+		if (!pfn_in_hpage(pvmw->page, pfn))
+			return 0;
+		return 1;
+	} else if (!pmd_present(*pvmw->pmd)) {
+		if (thp_migration_supported()) {
+			if (!(pvmw->flags & PVMW_MIGRATION))
+				return 0;
+			if (is_migration_entry(pmd_to_swp_entry(*pvmw->pmd))) {
+				swp_entry_t entry = pmd_to_swp_entry(*pvmw->pmd);
+
+				pfn = migration_entry_to_pfn(entry);
+				if (!pfn_in_hpage(pvmw->page, pfn))
+					return 0;
+				return 1;
+			}
+		}
+		return 0;
+	}
+	/* THP pmd was split under us: handle on pte level */
+	spin_unlock(pvmw->ptl);
+	pvmw->ptl = NULL;
+	return 2;
+}
 /**
  * page_vma_mapped_walk - check if @pvmw->page is mapped in @pvmw->vma at
  * @pvmw->address
@@ -120,14 +168,14 @@ bool page_vma_mapped_walk(struct page_vma_mapped_walk *pvmw)
 	pgd_t *pgd;
 	p4d_t *p4d;
 	pud_t pude;
-	pmd_t pmde;
+	int pmd_res;
 
 	if (!pvmw->pte && !pvmw->pmd && pvmw->pud)
 		return not_found(pvmw);
 
 	/* The only possible pmd mapping has been handled on last iteration */
 	if (pvmw->pmd && !pvmw->pte)
-		return not_found(pvmw);
+		goto next_pmd;
 
 	if (pvmw->pte)
 		goto next_pte;
@@ -176,6 +224,7 @@ restart:
 	} else if (!pud_present(pude))
 		return false;
 
+#if 0
 	pvmw->pmd = pmd_offset(pvmw->pud, pvmw->address);
 	/*
 	 * Make sure the pmd value isn't cached in a register by the
@@ -212,7 +261,45 @@ restart:
 	} else if (!pmd_present(pmde)) {
 		return false;
 	}
+#endif
 
+	if (!map_pmd(pvmw))
+		goto next_pmd;
+	/* pmd locked after map_pmd  */
+	while (1) {
+		pmd_res = check_pmd(pvmw);
+		if (pmd_res == 1) /* pmd_page */
+			return true;
+		else if (pmd_res == 2) /* pmd entry  */
+			goto pte_level;
+next_pmd:
+		/* Only PMD-mapped PUD THP has next pmd  */
+		if (!(PageTransHuge(pvmw->page) && compound_order(pvmw->page) == HPAGE_PUD_ORDER))
+			return not_found(pvmw);
+		do {
+			pvmw->address += HPAGE_PMD_SIZE;
+			if (pvmw->address >= pvmw->vma->vm_end ||
+			    pvmw->address >=
+					__vma_address(pvmw->page, pvmw->vma) +
+					hpage_nr_pages(pvmw->page) * PAGE_SIZE)
+				return not_found(pvmw);
+			/* Did we cross page table boundary? */
+			if (pvmw->address % PUD_SIZE == 0) {
+				if (pvmw->ptl) {
+					spin_unlock(pvmw->ptl);
+					pvmw->ptl = NULL;
+				}
+				goto restart;
+			} else {
+				pvmw->pmd++;
+			}
+		} while (pmd_none(*pvmw->pmd));
+
+		if (!pvmw->ptl)
+			pvmw->ptl = pmd_lock(mm, pvmw->pmd);
+	}
+
+pte_level:
 	if (!map_pte(pvmw))
 		goto next_pte;
 	while (1) {
