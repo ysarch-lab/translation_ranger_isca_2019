@@ -5061,7 +5061,6 @@ int promote_list_to_huge_pud_page(struct page *head, struct list_head *list)
 			TTU_RMAP_LOCKED ;
 		bool unmap_success;
 		struct pglist_data *pgdata = NULL;
-		unsigned long flags;
 
 		if (PageAnon(subpage))
 			ttu_flags |= TTU_SPLIT_FREEZE;
@@ -5071,12 +5070,12 @@ int promote_list_to_huge_pud_page(struct page *head, struct list_head *list)
 
 		/* remove subpages from page_deferred_list */
 		pgdata = NODE_DATA(page_to_nid(subpage));
-		spin_lock_irqsave(&pgdata->split_queue_lock, flags);
+		spin_lock(&pgdata->split_queue_lock);
 		if (!list_empty(page_deferred_list(subpage))) {
 			pgdata->split_queue_len--;
 			list_del_init(page_deferred_list(subpage));
 		}
-		spin_unlock_irqrestore(&pgdata->split_queue_lock, flags);
+		spin_unlock(&pgdata->split_queue_lock);
 	}
 
 	/*first_compound_mapcount = compound_mapcount(head);*/
