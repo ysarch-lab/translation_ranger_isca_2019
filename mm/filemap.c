@@ -1182,6 +1182,14 @@ static inline bool clear_bit_unlock_is_negative_byte(long nr, volatile void *mem
 
 #endif
 
+void __unlock_page(struct page *page)
+{
+	BUILD_BUG_ON(PG_waiters != 7);
+	VM_BUG_ON_PAGE(!PageLocked(page), page);
+	if (clear_bit_unlock_is_negative_byte(PG_locked, &page->flags))
+		wake_up_page_bit(page, PG_locked);
+}
+
 /**
  * unlock_page - unlock a locked page
  * @page: the page

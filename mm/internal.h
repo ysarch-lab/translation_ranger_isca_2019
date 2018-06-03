@@ -574,6 +574,7 @@ void prep_new_page(struct page *page, unsigned int order, gfp_t gfp_flags,
 
 unsigned int khugepaged_scan_mm(struct mm_struct *mm);
 
+void __unlock_page(struct page *page);
 int promote_huge_pmd_address(struct vm_area_struct *vma, unsigned long haddr);
 int promote_huge_pud_address(struct vm_area_struct *vma, unsigned long haddr);
 

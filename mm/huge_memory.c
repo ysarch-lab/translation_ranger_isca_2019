@@ -4558,6 +4558,18 @@ int promote_list_to_huge_page(struct page *head, struct list_head *list)
 		goto out_unlock;
 	}
 
+	list_for_each_entry(subpage, list, lru) {
+		enum ttu_flags ttu_flags = TTU_IGNORE_MLOCK | TTU_IGNORE_ACCESS |
+			TTU_RMAP_LOCKED ;
+		bool unmap_success;
+
+		if (PageAnon(subpage))
+			ttu_flags |= TTU_SPLIT_FREEZE;
+
+		unmap_success = try_to_unmap(subpage, ttu_flags);
+		VM_BUG_ON_PAGE(!unmap_success, subpage);
+	}
+
 	/* Take care of migration wait list:
 	 * make compound page first, since it is impossible to move waiting
 	 * process from subpage queues to the head page queue.
@@ -4574,14 +4586,20 @@ int promote_list_to_huge_page(struct page *head, struct list_head *list)
 		/* move subpage refcount to head page */
 		page_ref_add(head, page_count(p) - 1);
 		set_page_count(p, 0);
-		unlock_page(p);
 		set_compound_head(p, head);
 	}
 	prep_transhuge_page(head);
 	atomic_set(compound_mapcount_ptr(head), -1);
 
+	unfreeze_page(head);
+
 	if (!mem_cgroup_disabled())
 		mod_memcg_state(head->mem_cgroup, MEMCG_RSS_HUGE, HPAGE_PMD_NR);
+
+	for (i = 1; i < HPAGE_PMD_NR; i++) {
+		struct page *subpage = head + i;
+		__unlock_page(subpage);
+	}
 
 	INIT_LIST_HEAD(&head->lru);
 	unlock_page(head);
@@ -4838,7 +4856,6 @@ static int __promote_huge_pud_page_isolate(struct vm_area_struct *vma,
 					struct page **head, struct list_head *subpage_list)
 {
 	struct page *page = NULL;
-	struct pglist_data *pgdata = NULL;
 	pmd_t *_pmd;
 	bool writable = false;
 	unsigned long address = haddr;
@@ -4926,22 +4943,13 @@ static int __promote_huge_pud_page_isolate(struct vm_area_struct *vma,
 	}
 	if (likely(writable)) {
 		int i;
-		unsigned long flags;
 
-		pgdata = NODE_DATA(page_to_nid(page));
-		spin_lock_irqsave(&pgdata->split_queue_lock, flags);
 		for (i = 0; i < HPAGE_PUD_NR; i += HPAGE_PMD_NR) {
 			struct page *p = *head + i;
 
-			if (!list_empty(page_deferred_list(p))) {
-				pgdata->split_queue_len--;
-				list_del(page_deferred_list(p));
-				INIT_LIST_HEAD(page_deferred_list(p));
-			}
 			list_add_tail(&p->lru, subpage_list);
 			VM_BUG_ON_PAGE(!PageLocked(p), p);
 		}
-		spin_unlock_irqrestore(&pgdata->split_queue_lock, flags);
 		return 1;
 	} else {
 		/*result = SCAN_PAGE_RO;*/
@@ -5015,7 +5023,6 @@ int promote_list_to_huge_pud_page(struct page *head, struct list_head *list)
 	DECLARE_BITMAP(subpage_bitmap, HPAGE_PMD_NR);
 	struct page *subpage;
 	int i;
-	int first_compound_mapcount = 0;
 
 	/* no file-backed page support yet */
 	if (PageAnon(head)) {
@@ -5049,7 +5056,30 @@ int promote_list_to_huge_pud_page(struct page *head, struct list_head *list)
 		goto out_unlock;
 	}
 
-	first_compound_mapcount = compound_mapcount(head);
+	list_for_each_entry(subpage, list, lru) {
+		enum ttu_flags ttu_flags = TTU_IGNORE_MLOCK | TTU_IGNORE_ACCESS |
+			TTU_RMAP_LOCKED ;
+		bool unmap_success;
+		struct pglist_data *pgdata = NULL;
+		unsigned long flags;
+
+		if (PageAnon(subpage))
+			ttu_flags |= TTU_SPLIT_FREEZE;
+
+		unmap_success = try_to_unmap(subpage, ttu_flags);
+		VM_BUG_ON_PAGE(!unmap_success, subpage);
+
+		/* remove subpages from page_deferred_list */
+		pgdata = NODE_DATA(page_to_nid(subpage));
+		spin_lock_irqsave(&pgdata->split_queue_lock, flags);
+		if (!list_empty(page_deferred_list(subpage))) {
+			pgdata->split_queue_len--;
+			list_del_init(page_deferred_list(subpage));
+		}
+		spin_unlock_irqrestore(&pgdata->split_queue_lock, flags);
+	}
+
+	/*first_compound_mapcount = compound_mapcount(head);*/
 	/* Take care of migration wait list:
 	 * make compound page first, since it is impossible to move waiting
 	 * process from subpage queues to the head page queue.
@@ -5060,33 +5090,34 @@ int promote_list_to_huge_pud_page(struct page *head, struct list_head *list)
 	list_del(&head->lru);
 	for (i = 1; i < HPAGE_PUD_NR; i++) {
 		struct page *p = head + i;
-		p->index = 0;
-		/* avoid overwriting sub_compound_mapcount */
-		if (i % HPAGE_PMD_NR != 3)
-			p->mapping = TAIL_MAPPING;
-		p->mem_cgroup = NULL;
-		ClearPageActive(p);
-		/* move subpage refcount to head page */
+
 		if (i % HPAGE_PMD_NR == 0) {
 			list_del(&p->lru);
+			/* move subpage refcount to head page */
 			page_ref_add(head, page_count(p) - 1);
-			/*atomic_set(sub_compound_mapcount_ptr(p, 1),*/
-			atomic_set(&p[2+1].compound_mapcount,
-				compound_mapcount(p) - 1);
-			/* will be set to TAIL_MAPPING in next iteration */
-			atomic_set(compound_mapcount_ptr(p), 0);
-			ClearPageCompound(p);
-			set_compound_page_dtor(p, NULL_COMPOUND_DTOR);
-			unlock_page(p);
 		}
+		p->index = 0;
+		p->mapping = TAIL_MAPPING;
+		p->mem_cgroup = NULL;
+		ClearPageActive(p);
 		set_page_count(p, 0);
 		set_compound_head(p, head);
 	}
+	atomic_set(compound_mapcount_ptr(head), -1);
+	for (i = 0; i < HPAGE_PUD_NR; i += HPAGE_PMD_NR)
+		atomic_set(sub_compound_mapcount_ptr(&head[i], 1), -1);
 	prep_transhuge_page(head);
 	/* Set first PMD-mapped page sub_compound_mapcount */
-	atomic_set(sub_compound_mapcount_ptr(head, 1), first_compound_mapcount - 1);
-	atomic_set(compound_mapcount_ptr(head), -1);
+	/*atomic_set(sub_compound_mapcount_ptr(head, 1), first_compound_mapcount - 1);*/
 
+	unfreeze_pud_page(head);
+
+	for (i = HPAGE_PMD_NR; i < HPAGE_PUD_NR; i += HPAGE_PMD_NR) {
+		struct page *subpage = head + i;
+		__unlock_page(subpage);
+	}
+
+	INIT_LIST_HEAD(&head->lru);
 	unlock_page(head);
 	putback_lru_page(head);
 

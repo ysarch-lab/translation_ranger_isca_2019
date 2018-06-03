@@ -1109,12 +1109,13 @@ void do_page_add_anon_rmap(struct page *page,
 {
 	bool compound = flags & RMAP_COMPOUND;
 	bool first;
+	struct page *head = compound_head(page);
 
 	if (compound) {
 		atomic_t *mapcount;
 		VM_BUG_ON_PAGE(!PageLocked(page), page);
-		VM_BUG_ON_PAGE(!PageTransHuge(page), page);
-		if (compound_order(page) == HPAGE_PUD_ORDER) {
+		VM_BUG_ON_PAGE(!PMDPageInPUD(page) && !PageTransHuge(page), page);
+		if (compound_order(head) == HPAGE_PUD_ORDER) {
 			if (order == HPAGE_PUD_ORDER) {
 				mapcount = compound_mapcount_ptr(page);
 			} else if (order == HPAGE_PMD_ORDER) {
@@ -1122,7 +1123,7 @@ void do_page_add_anon_rmap(struct page *page,
 				mapcount = sub_compound_mapcount_ptr(page, 1);
 			} else
 				VM_BUG_ON(1);
-		} else if (compound_order(page) == HPAGE_PMD_ORDER) {
+		} else if (compound_order(head) == HPAGE_PMD_ORDER) {
 			mapcount = compound_mapcount_ptr(page);
 		} else
 			VM_BUG_ON(1);
@@ -1132,7 +1133,8 @@ void do_page_add_anon_rmap(struct page *page,
 	}
 
 	if (first) {
-		int nr = compound ? hpage_nr_pages(page) : 1;
+		/*int nr = compound ? hpage_nr_pages(page) : 1;*/
+		int nr = 1<<order;
 		/*
 		 * We use the irq-unsafe __{inc|mod}_zone_page_stat because
 		 * these counters are not modified in interrupt context, and
@@ -1425,6 +1427,7 @@ static bool try_to_unmap_one(struct page *page, struct vm_area_struct *vma,
 	bool ret = true;
 	unsigned long start = address, end;
 	enum ttu_flags flags = (enum ttu_flags)arg;
+	int order = 0;
 
 	/* munlock has nothing to gain from examining un-locked vmas */
 	if ((flags & TTU_MUNLOCK) && !(vma->vm_flags & VM_LOCKED))
@@ -1492,12 +1495,16 @@ static bool try_to_unmap_one(struct page *page, struct vm_area_struct *vma,
 		/* Unexpected PMD-mapped THP? */
 		/*VM_BUG_ON_PAGE(!pvmw.pte, page);*/
 
-		if (pvmw.pte)
+		if (pvmw.pte) {
 			subpage = page - page_to_pfn(page) + pte_pfn(*pvmw.pte);
-		else if (!pvmw.pte && pvmw.pmd)
+			order = 0;
+		} else if (!pvmw.pte && pvmw.pmd) {
 			subpage = page - page_to_pfn(page) + pmd_pfn(*pvmw.pmd);
-		else if (!pvmw.pte && !pvmw.pmd && pvmw.pud)
+			order = HPAGE_PMD_ORDER;
+		} else if (!pvmw.pte && !pvmw.pmd && pvmw.pud) {
 			subpage = page - page_to_pfn(page) + pud_pfn(*pvmw.pud);
+			order = HPAGE_PUD_ORDER;
+		}
 		BUG_ON(!subpage);
 		address = pvmw.address;
 
@@ -1742,7 +1749,7 @@ discard:
 		 *
 		 * See Documentation/vm/mmu_notifier.txt
 		 */
-		page_remove_rmap(subpage, PageHuge(page), 0);
+		page_remove_rmap(subpage, PageHuge(page) || order >= HPAGE_PMD_ORDER, order);
 		put_page(page);
 	}
 
