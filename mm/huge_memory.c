@@ -4321,6 +4321,7 @@ int promote_huge_pmd_address(struct vm_area_struct *vma, unsigned long haddr)
 		pte_t pteval = *_pte;
 
 		if (pte_none(pteval) || is_zero_pfn(pte_pfn(pteval))) {
+			pr_err("pte none or zero pfn during pmd promotion\n");
 			if (is_zero_pfn(pte_pfn(pteval))) {
 				/*
 				 * ptl mostly unnecessary.
@@ -4346,6 +4347,11 @@ int promote_huge_pmd_address(struct vm_area_struct *vma, unsigned long haddr)
 			 */
 			pte_clear(vma->vm_mm, address, _pte);
 			atomic_dec(&page->_mapcount);
+			/*page_remove_rmap(page, false, 0);*/
+			if (atomic_read(&page->_mapcount) > -1) {
+				SetPageDoubleMap(head);
+				pr_info("page double mapped");
+			}
 			spin_unlock(pte_ptl);
 		}
 	}
@@ -4366,11 +4372,12 @@ int promote_huge_pmd_address(struct vm_area_struct *vma, unsigned long haddr)
 
 	spin_lock(pmd_ptl);
 	BUG_ON(!pmd_none(*pmd));
+	/*page_add_new_anon_rmap(head, vma, haddr, true, HPAGE_PMD_ORDER);*/
+	atomic_inc(compound_mapcount_ptr(head));
+	__inc_node_page_state(head, NR_ANON_THPS);
 	pgtable_trans_huge_deposit(mm, pmd, pgtable);
 	set_pmd_at(mm, haddr, pmd, _pmd);
 	update_mmu_cache_pmd(vma, haddr, pmd);
-	atomic_inc(compound_mapcount_ptr(head));
-	__inc_node_page_state(head, NR_ANON_THPS);
 	spin_unlock(pmd_ptl);
 	unlock_page(head);
 	ret = 0;
@@ -4594,8 +4601,8 @@ int promote_list_to_huge_page(struct page *head, struct list_head *list)
 		set_page_count(p, 0);
 		set_compound_head(p, head);
 	}
-	prep_transhuge_page(head);
 	atomic_set(compound_mapcount_ptr(head), -1);
+	prep_transhuge_page(head);
 
 	unfreeze_page(head);
 
