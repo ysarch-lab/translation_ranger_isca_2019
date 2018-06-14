@@ -4282,6 +4282,9 @@ int promote_huge_pmd_address(struct vm_area_struct *vma, unsigned long haddr)
 
 	VM_BUG_ON(haddr & ~HPAGE_PMD_MASK);
 
+	if (haddr < vma->vm_start || (haddr + HPAGE_PMD_SIZE) > vma->vm_end)
+		return -EINVAL;
+
 	pmd = mm_find_pmd(mm, haddr);
 	if (!pmd || pmd_trans_huge(*pmd))
 		goto out;
@@ -4666,6 +4669,12 @@ int promote_huge_page_address(struct vm_area_struct *vma, unsigned long haddr)
 	LIST_HEAD(subpage_list);
 	struct page *head;
 
+	if (haddr & (HPAGE_PMD_SIZE - 1))
+		return -EINVAL;
+
+	if (haddr < vma->vm_start || (haddr + HPAGE_PMD_SIZE) > vma->vm_end)
+		return -EINVAL;
+
 	if (promote_huge_page_isolate(vma, haddr, &head, &subpage_list))
 		return -EBUSY;
 
@@ -4713,6 +4722,9 @@ int promote_huge_pud_address(struct vm_area_struct *vma, unsigned long haddr)
 	int ret = -EBUSY;
 
 	VM_BUG_ON(haddr & ~HPAGE_PUD_MASK);
+
+	if (haddr < vma->vm_start || (haddr + HPAGE_PUD_SIZE) > vma->vm_end)
+		return -EINVAL;
 
 	pud = mm_find_pud(mm, haddr);
 	if (!pud)
@@ -5149,6 +5161,8 @@ int promote_huge_pud_page_address(struct vm_area_struct *vma, unsigned long hadd
 	struct page *head;
 
 	if (haddr & (HPAGE_PUD_SIZE - 1))
+		return -EINVAL;
+	if (haddr < vma->vm_start || (haddr + HPAGE_PUD_SIZE) > vma->vm_end)
 		return -EINVAL;
 
 	if (promote_huge_pud_page_isolate(vma, haddr, &head, &subpage_list))
