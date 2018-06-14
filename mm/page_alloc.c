@@ -1004,8 +1004,10 @@ static int free_tail_pages_check(struct page *head_page, struct page *page)
 		/* sub_compound_map_ptr store here */
 		if (compound_order(head_page) == HPAGE_PUD_ORDER &&
 			(page - head_page) % HPAGE_PMD_NR == 3) {
-			if (unlikely(atomic_read(&page->compound_mapcount) != -1))
+			if (unlikely(atomic_read(&page->compound_mapcount) != -1)) {
+				pr_err("sub_compound_mapcount: %d\n", atomic_read(&page->compound_mapcount) + 1);
 				bad_page(page, "nonzero sub_compound_mapcount", 0);
+			}
 			break;
 		}
 		if (page->mapping != TAIL_MAPPING) {
