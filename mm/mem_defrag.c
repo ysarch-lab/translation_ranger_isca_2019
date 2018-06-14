@@ -719,13 +719,13 @@ int defrag_address_range(struct mm_struct *mm, struct vm_area_struct *vma,
 
 		page_size = get_contig_page_size(scan_page);
 
+		if (compound_order(compound_head(scan_page)) == HPAGE_PUD_ORDER) {
+			defrag_stats->aligned_max_order = HPAGE_PUD_ORDER;
+			goto quit_defrag;
+		}
 		/* PTE-mapped THP not allowed  */
 		if ((scan_page == compound_head(scan_page)) &&
 			PageTransHuge(scan_page) && !PageHuge(scan_page)) {
-			if (compound_order(scan_page) == HPAGE_PUD_ORDER) {
-				defrag_stats->aligned_max_order = HPAGE_PUD_ORDER;
-				goto quit_defrag;
-			}
 			src_thp = true;
 		}
 
@@ -900,15 +900,14 @@ freepage_isolate_fail:
 			} else { /* exchange  */
 				int err = -EBUSY;
 
+				if (compound_order(compound_head(dest_page)) == HPAGE_PUD_ORDER) {
+					defrag_stats->aligned_max_order = HPAGE_PUD_ORDER;
+					goto quit_defrag;
+				}
 				/* PTE-mapped THP not allowed  */
 				if ((dest_page == compound_head(dest_page)) &&
-					PageTransHuge(dest_page) && !PageHuge(dest_page)) {
-					if (compound_order(dest_page) == HPAGE_PUD_ORDER) {
-						defrag_stats->aligned_max_order = HPAGE_PUD_ORDER;
-						goto quit_defrag;
-					}
+					PageTransHuge(dest_page) && !PageHuge(dest_page))
 					dst_thp = true;
-				}
 
 				if (PageCompound(dest_page) && !dst_thp) {
 					failed += get_contig_page_size(dest_page);
@@ -1430,14 +1429,14 @@ static int kmem_defragd_scan_mm(struct defrag_scan_control *sc)
 					*scan_address += PAGE_SIZE;
 			} else if (sc->action == MEM_DEFRAG_DO_DEFRAG) {
 				/* go to nearest 2MB aligned address  */
+				unsigned long defrag_begin = *scan_address;
 				unsigned long defrag_end = min_t(unsigned long,
 							(*scan_address + HPAGE_PUD_SIZE) & HPAGE_PUD_MASK,
 							vend);
 				int defrag_result;
+				int nr_fails_in_1gb_range = 0;
+				int skip_promotion = 0;
 				/*bool found_anchor_page;*/
-				struct defrag_result_stats defrag_stats = {0};
-
-continue_defrag:
 				anchor_node = get_anchor_page_node_from_vma(vma, *scan_address);
 
 				/*  in case VMA size changes */
@@ -1452,88 +1451,134 @@ continue_defrag:
 					VM_BUG_ON(1);
 				}
 
-				defrag_result = defrag_address_range(mm, vma, *scan_address,
-					defrag_end,
-					pfn_to_page(anchor_node->anchor_pfn), anchor_node->anchor_vpn<<PAGE_SHIFT,
-					&defrag_stats);
+				while (*scan_address < defrag_end) {
+					unsigned long defrag_sub_chunk_end = min_t(unsigned long,
+							(*scan_address + HPAGE_PMD_SIZE) & HPAGE_PMD_MASK,
+							defrag_end);
+					struct defrag_result_stats defrag_stats = {0};
+continue_defrag:
+					if (!anchor_node) {
+						anchor_node = get_anchor_page_node_from_vma(vma, *scan_address);
+						if (!anchor_node) {
+							find_anchor_pages_in_vma(mm, vma, *scan_address);
+							anchor_node = get_anchor_page_node_from_vma(vma, *scan_address);
+						}
+						if (!anchor_node)
+							goto done_one_vma;
+					}
 
-				if (remain_buf_len && stats_buf) {
-					int used_len;
-					int pos = sc->buf_len -remain_buf_len;
+					defrag_result = defrag_address_range(mm, vma, *scan_address,
+						defrag_sub_chunk_end,
+						pfn_to_page(anchor_node->anchor_pfn), anchor_node->anchor_vpn<<PAGE_SHIFT,
+						&defrag_stats);
 
-					/*
-					 * aligned, migrated,
-					 * src_compound_failed,
-					 * dst_out_of_bound_failed,
-					 * dst_compound_failed, dst_free_failed,
-					 * dst_anon_failed, dst_file_failed,
-					 * dst_misc_failed;
-					 */
-					used_len = scnprintf(stats_buf + pos, remain_buf_len,
-						"[0x%lx, 0x%lx):%lu [alig:%lu, migrated:%lu, src: not:%lu, com:%lu, dst: bound:%lu, com:%lu, free:%lu, anon:%lu, file:%lu, misc:%lu], "
-						"anchor: (%lx, %lx), range: [%lx, %lx], vma: 0x%lx, not_defrag_vpn: %lx\n",
-						*scan_address, defrag_end,
-						(defrag_end - *scan_address)/PAGE_SIZE,
-						defrag_stats.aligned,
-						defrag_stats.migrated,
-						defrag_stats.src_not_present,
-						defrag_stats.src_compound_failed,
-						defrag_stats.dst_out_of_bound_failed,
-						defrag_stats.dst_compound_failed,
-						defrag_stats.dst_free_failed,
-						defrag_stats.dst_anon_failed,
-						defrag_stats.dst_file_failed,
-						defrag_stats.dst_misc_failed,
-						anchor_node->anchor_vpn,
-						anchor_node->anchor_pfn,
-						anchor_node->node.start,
-						anchor_node->node.last,
-						(unsigned long)vma+vma->vma_create_jiffies,
-						defrag_stats.not_defrag_vpn
-						);
+					if (remain_buf_len && stats_buf) {
+						int used_len;
+						int pos = sc->buf_len -remain_buf_len;
 
-					remain_buf_len -= used_len;
+						/*
+						 * aligned, migrated,
+						 * src_compound_failed,
+						 * dst_out_of_bound_failed,
+						 * dst_compound_failed, dst_free_failed,
+						 * dst_anon_failed, dst_file_failed,
+						 * dst_misc_failed;
+						 */
+						used_len = scnprintf(stats_buf + pos, remain_buf_len,
+							"[0x%lx, 0x%lx):%lu [alig:%lu, migrated:%lu, src: not:%lu, com:%lu, dst: bound:%lu, com:%lu, free:%lu, anon:%lu, file:%lu, misc:%lu], "
+							"anchor: (%lx, %lx), range: [%lx, %lx], vma: 0x%lx, not_defrag_vpn: %lx\n",
+							*scan_address, defrag_sub_chunk_end,
+							(defrag_sub_chunk_end - *scan_address)/PAGE_SIZE,
+							defrag_stats.aligned,
+							defrag_stats.migrated,
+							defrag_stats.src_not_present,
+							defrag_stats.src_compound_failed,
+							defrag_stats.dst_out_of_bound_failed,
+							defrag_stats.dst_compound_failed,
+							defrag_stats.dst_free_failed,
+							defrag_stats.dst_anon_failed,
+							defrag_stats.dst_file_failed,
+							defrag_stats.dst_misc_failed,
+							anchor_node->anchor_vpn,
+							anchor_node->anchor_pfn,
+							anchor_node->node.start,
+							anchor_node->node.last,
+							(unsigned long)vma+vma->vma_create_jiffies,
+							defrag_stats.not_defrag_vpn
+							);
 
-					if (remain_buf_len == 1) {
-						stats_buf[pos] = '\0';
-						remain_buf_len = 0;
+						remain_buf_len -= used_len;
+
+						if (remain_buf_len == 1) {
+							stats_buf[pos] = '\0';
+							remain_buf_len = 0;
+						}
+					}
+
+
+					if (defrag_stats.not_defrag_vpn) {
+						VM_BUG_ON(defrag_sub_chunk_end != defrag_end && defrag_stats.not_defrag_vpn > defrag_sub_chunk_end);
+						find_anchor_pages_in_vma(mm, vma, defrag_stats.not_defrag_vpn);
+						anchor_node = NULL;
+
+						nr_fails_in_1gb_range += 1;
+						if (defrag_stats.not_defrag_vpn < defrag_sub_chunk_end) {
+							/* reset and continue  */
+							*scan_address = defrag_stats.not_defrag_vpn;
+							defrag_stats.not_defrag_vpn = 0;
+							goto continue_defrag;
+						}
+					} else {
+#if 1
+						/* defrag works for the whole chunk, promote to PMD THP in place */
+						if (!defrag_result &&
+							defrag_stats.aligned_max_order < HPAGE_PMD_ORDER && /* avoid existing THP */
+							!(*scan_address & (HPAGE_PMD_SIZE-1)) &&
+							!(defrag_sub_chunk_end & (HPAGE_PMD_SIZE-1))) {
+							int ret = 0;
+							pr_debug("find a range to promote pmd: [%lx, %lx)\n", *scan_address, defrag_sub_chunk_end);
+							down_write(&mm->mmap_sem);
+							if (!(ret = promote_huge_page_address(vma, *scan_address))) {
+								pr_debug("promote huge pmd page successful!\n");
+								if (!(ret = promote_huge_pmd_address(vma, *scan_address)))
+									pr_debug("2MB THP created!\n");
+							}
+							up_write(&mm->mmap_sem);
+						}
+#endif
+						/* skip PUD pages */
+						if (defrag_stats.aligned_max_order == HPAGE_PUD_ORDER) {
+							*scan_address = defrag_end;
+							skip_promotion = 1;
+							continue;
+						}
+					}
+
+					*scan_address = defrag_sub_chunk_end;
+					scanned_chunks++;
+					if (num_breakout_chunks && scanned_chunks >= num_breakout_chunks){
+						scanned_chunks = 0;
+						goto breakouterloop;
 					}
 				}
 
-				if (defrag_stats.not_defrag_vpn) {
-					VM_BUG_ON(defrag_end != vend && defrag_stats.not_defrag_vpn > defrag_end);
-					find_anchor_pages_in_vma(mm, vma, defrag_stats.not_defrag_vpn);
-
-					if (defrag_stats.not_defrag_vpn < defrag_end) {
-						/* reset and continue  */
-						*scan_address = defrag_stats.not_defrag_vpn;
-						defrag_stats.not_defrag_vpn = 0;
-						goto continue_defrag;
-					}
-				}
-
-				/* defrag works for the whole chunk, promote to THP in place */
-				if (!defrag_result &&
-					defrag_stats.aligned_max_order < HPAGE_PUD_ORDER && /* avoid existing THP */
-					!(*scan_address & (HPAGE_PUD_SIZE-1)) &&
+#if 1
+				/* defrag works for the whole chunk, promote to PUD THP in place */
+				if (!nr_fails_in_1gb_range &&
+					!skip_promotion && /* avoid existing THP */
+					!(defrag_begin & (HPAGE_PUD_SIZE-1)) &&
 					!(defrag_end & (HPAGE_PUD_SIZE-1))) {
 					int ret = 0;
-					pr_debug("find a range to promote: [%lx, %lx)\n", *scan_address, defrag_end);
+					pr_debug("find a range to promote pud: [%lx, %lx)\n", defrag_begin, defrag_end);
 					down_write(&mm->mmap_sem);
-					if (!(ret = promote_huge_pud_page_address(vma, *scan_address))) {
+					if (!(ret = promote_huge_pud_page_address(vma, defrag_begin))) {
 						pr_debug("promote huge pud page successful!\n");
-						if (mem_defrag_promote_1gb_thp && !(ret = promote_huge_pud_address(vma, *scan_address)))
+						if (mem_defrag_promote_1gb_thp && !(ret = promote_huge_pud_address(vma, defrag_begin)))
 							pr_debug("1GB THP created!\n");
 					}
 					up_write(&mm->mmap_sem);
 				}
-
-				*scan_address = defrag_end;
-				scanned_chunks++;
-				if (num_breakout_chunks && scanned_chunks >= num_breakout_chunks) {
-					scanned_chunks = 0;
-					goto breakouterloop;
-				}
+#endif
 			}
 		}
 done_one_vma:
