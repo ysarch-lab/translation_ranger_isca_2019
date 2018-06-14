@@ -3783,6 +3783,8 @@ int total_mapcount(struct page *page)
 	} else if (compound_order(page) == HPAGE_PUD_ORDER) {
 		for (i = 0; i < HPAGE_PUD_NR; i += HPAGE_PMD_NR)
 			ret += sub_compound_mapcount(&page[i]);
+		for (i = 0; i < hpage_nr_pages(page); i++)
+			ret += atomic_read(&page[i]._mapcount) + 1;
 	} else
 		VM_BUG_ON_PAGE(1, page);
 	/* File pages has compound_mapcount included in _mapcount */

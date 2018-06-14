@@ -519,10 +519,13 @@ EXPORT_SYMBOL(page_mapping);
 int __page_mapcount(struct page *page)
 {
 	int ret;
+	struct page *head = compound_head(page);
 
 	ret = atomic_read(&page->_mapcount) + 1;
-	if (PMDPageInPUD(page))
-		ret += sub_compound_mapcount(page);
+	if (compound_order(head) == HPAGE_PUD_ORDER) {
+		struct page *sub_compound_page = head + (((page - head) / HPAGE_PMD_NR) * HPAGE_PMD_NR);
+		ret += sub_compound_mapcount(sub_compound_page);
+	}
 	/*
 	 * For file THP page->_mapcount contains total number of mapping
 	 * of the page: no need to look into compound_mapcount.
