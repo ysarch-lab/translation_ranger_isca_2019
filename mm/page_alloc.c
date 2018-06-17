@@ -1273,6 +1273,24 @@ void __meminit reserve_bootmem_region(phys_addr_t start, phys_addr_t end)
 	}
 }
 
+static void destroy_compound_gigantic_page(struct page *page,
+					unsigned int order)
+{
+	int i;
+	int nr_pages = 1 << order;
+	struct page *p = page + 1;
+
+	atomic_set(compound_mapcount_ptr(page), 0);
+	for (i = 1; i < nr_pages; i++, p = mem_map_next(p, page, i)) {
+		clear_compound_head(p);
+		set_page_refcounted(p);
+	}
+
+	set_compound_order(page, 0);
+	__ClearPageHead(page);
+	set_page_refcounted(page);
+}
+
 static void __free_pages_ok(struct page *page, unsigned int order)
 {
 	unsigned long flags;
@@ -1282,11 +1300,16 @@ static void __free_pages_ok(struct page *page, unsigned int order)
 	if (!free_pages_prepare(page, order, true))
 		return;
 
-	migratetype = get_pfnblock_migratetype(page, pfn);
-	local_irq_save(flags);
-	__count_vm_events(PGFREE, 1 << order);
-	free_one_page(page_zone(page), page, pfn, order, migratetype);
-	local_irq_restore(flags);
+	if (order > MAX_ORDER) {
+		destroy_compound_gigantic_page(page, order);
+		free_contig_range(page_to_pfn(page), 1 << order);
+	} else {
+		migratetype = get_pfnblock_migratetype(page, pfn);
+		local_irq_save(flags);
+		__count_vm_events(PGFREE, 1 << order);
+		free_one_page(page_zone(page), page, pfn, order, migratetype);
+		local_irq_restore(flags);
+	}
 }
 
 static void __init __free_pages_boot_core(struct page *page, unsigned int order)
