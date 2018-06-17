@@ -47,7 +47,8 @@ struct defrag_result_stats {
 	unsigned long dst_free_failed;
 	unsigned long dst_anon_failed;
 	unsigned long dst_file_failed;
-	unsigned long dst_misc_failed;
+	unsigned long dst_non_lru_failed;
+	unsigned long dst_non_moveable_failed;
 	unsigned long not_defrag_vpn;
 	unsigned int aligned_max_order;
 };
@@ -949,7 +950,7 @@ freepage_isolate_fail:
 					/* not managed pages  */
 					if (!dest_page->flags) {
 						failed += 1;
-						defrag_stats->dst_misc_failed += 1;
+						defrag_stats->dst_out_of_bound_failed += 1;
 
 			defrag_stats->not_defrag_vpn = scan_address + page_size;
 			goto quit_defrag;
@@ -987,13 +988,17 @@ freepage_isolate_fail:
 						defrag_stats->dst_file_failed += 1<<scan_page_order;
 					}
 				} else if (!PageLRU(dest_page) && __PageMovable(dest_page)) {
+					err = -ENODEV;
+					count_vm_events(MEM_DEFRAG_DST_NONLRU_PAGES, 1<<scan_page_order);
 					failed += 1<<scan_page_order;
-					defrag_stats->dst_misc_failed += 1<<scan_page_order;
+					defrag_stats->dst_non_lru_failed += 1<<scan_page_order;
+					count_vm_events(MEM_DEFRAG_DST_NONLRU_PAGES_FAILED, 1<<scan_page_order);
 					pr_debug("non-lru movable page exchange\n");
 				} else {
+					err = -ENODEV;
 					failed += 1<<scan_page_order;
 					/* unmovable pages  */
-					defrag_stats->dst_misc_failed += 1<<scan_page_order;
+					defrag_stats->dst_non_moveable_failed += 1<<scan_page_order;
 					pr_debug("unmovable pages exchange\n");
 				}
 				pr_debug("exchange result: %d\n", err);
@@ -1485,7 +1490,8 @@ continue_defrag:
 						 * dst_misc_failed;
 						 */
 						used_len = scnprintf(stats_buf + pos, remain_buf_len,
-							"[0x%lx, 0x%lx):%lu [alig:%lu, migrated:%lu, src: not:%lu, com:%lu, dst: bound:%lu, com:%lu, free:%lu, anon:%lu, file:%lu, misc:%lu], "
+							"[0x%lx, 0x%lx):%lu [alig:%lu, migrated:%lu, src: not:%lu, compound:%lu, "
+							"dst: out_bound:%lu, compound:%lu, free:%lu, anon:%lu, file:%lu, non-lru:%lu, non-moveable:%lu], "
 							"anchor: (%lx, %lx), range: [%lx, %lx], vma: 0x%lx, not_defrag_vpn: %lx\n",
 							*scan_address, defrag_sub_chunk_end,
 							(defrag_sub_chunk_end - *scan_address)/PAGE_SIZE,
@@ -1498,7 +1504,8 @@ continue_defrag:
 							defrag_stats.dst_free_failed,
 							defrag_stats.dst_anon_failed,
 							defrag_stats.dst_file_failed,
-							defrag_stats.dst_misc_failed,
+							defrag_stats.dst_non_lru_failed,
+							defrag_stats.dst_non_moveable_failed,
 							anchor_node->anchor_vpn,
 							anchor_node->anchor_pfn,
 							anchor_node->node.start,
