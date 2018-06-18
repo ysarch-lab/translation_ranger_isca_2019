@@ -696,6 +696,7 @@ int defrag_address_range(struct mm_struct *mm, struct vm_area_struct *vma,
 	int not_present = 0;
 	bool src_thp = false;
 
+restart:
 	for (scan_address = start_addr; scan_address < end_addr;
 		 scan_address += page_size) {
 		struct page *scan_page;
@@ -923,9 +924,9 @@ freepage_isolate_fail:
 					failed += get_contig_page_size(scan_page);
 					defrag_stats->src_compound_failed += 1;
 
-			defrag_stats->not_defrag_vpn = scan_address + page_size;
-			goto quit_defrag;
-					continue;
+					defrag_stats->not_defrag_vpn = scan_address + page_size;
+					goto quit_defrag;
+					/*continue;*/
 				}
 
 				pr_debug("defrag: vma: %p, [0x%lx, 0x%lx]: vaddr: 0x%lx, origin page: 0x%lx, page in use: 0x%lx,"
@@ -1027,7 +1028,7 @@ void dump_anchor_info(struct vm_area_struct *vma, unsigned long scan_address)
 
 	pr_info("addr: %lx in vma [%lx, %lx)\n", scan_address, vma->vm_start, vma->vm_end);
 
-	for (iter = interval_tree_iter_first(&vma->anchor_page_rb, vma->vm_start, vma->vm_end);
+	for (iter = interval_tree_iter_first(&vma->anchor_page_rb, vma->vm_start, vma->vm_end - 1);
 		 iter;
 		 iter = interval_tree_iter_next(iter, vma->vm_start, vma->vm_end)) {
 
@@ -1066,6 +1067,59 @@ unsigned long get_aligned_pfn(unsigned long vpn, unsigned long lower_pfn,
 	return ((lower_pfn + offset_mask + 1) & aligned_mask) | vpn_offset;
 }
 
+unsigned long get_undefragged_area(int nid, struct vm_area_struct *vma,
+	unsigned long start_addr, unsigned long end_addr)
+{
+	struct mm_struct *mm = vma->vm_mm;
+	struct vm_area_struct *scan_vma = NULL;
+	unsigned long vma_size = end_addr - start_addr;
+
+	for (scan_vma = mm->mmap; scan_vma; scan_vma = scan_vma->vm_next)
+		if (!RB_EMPTY_ROOT(&scan_vma->anchor_page_rb.rb_root))
+			break;
+	/* no defragged area */
+	if (!scan_vma)
+		return NODE_DATA(nid)->node_start_pfn;
+
+	scan_vma = mm->mmap;
+	while (scan_vma) {
+		if (!RB_EMPTY_ROOT(&scan_vma->anchor_page_rb.rb_root)) {
+			struct interval_tree_node *node = NULL, *next_node = NULL;
+			struct anchor_page_node *anchor_node, *next_anchor_node = NULL;
+			struct vm_area_struct *next_vma = scan_vma->vm_next;
+			unsigned long end_pfn;
+			/* each vma get one anchor range */
+			node = interval_tree_iter_first(&scan_vma->anchor_page_rb,
+				 scan_vma->vm_start, scan_vma->vm_end - 1);
+			VM_BUG_ON(!node);
+
+			anchor_node = container_of(node, struct anchor_page_node, node);
+			end_pfn = (anchor_node->anchor_pfn +
+					((scan_vma->vm_end - scan_vma->vm_start)>>PAGE_SHIFT));
+
+			/* find next vma with anchor range */
+			for (next_vma = scan_vma->vm_next;
+				next_vma && RB_EMPTY_ROOT(&next_vma->anchor_page_rb.rb_root);
+				next_vma = next_vma->vm_next);
+
+			if (!next_vma)
+				return end_pfn;
+			else {
+				next_node = interval_tree_iter_first(&next_vma->anchor_page_rb,
+					 next_vma->vm_start, next_vma->vm_end - 1);
+				VM_BUG_ON(!next_node);
+				next_anchor_node = container_of(next_node, struct anchor_page_node, node);
+				if (end_pfn + vma_size < next_anchor_node->anchor_pfn)
+					return end_pfn;
+			}
+			scan_vma = next_vma;
+		} else
+			scan_vma = scan_vma->vm_next;
+	}
+
+	return NODE_DATA(nid)->node_start_pfn;
+}
+
 /*
  * anchor pages decide the va pa offset in each vma
  *
@@ -1074,13 +1128,10 @@ static int find_anchor_pages_in_vma(struct mm_struct *mm,
 		struct vm_area_struct *vma, unsigned long start_addr)
 {
 	struct anchor_page_node *anchor_node;
-	struct page *anchor_page = NULL;
-	unsigned long scan_address = start_addr;
 	unsigned long end_addr = vma->vm_end - PAGE_SIZE;
 	struct interval_tree_node *existing_anchor = NULL;
-	unsigned long existing_anchor_pfn = 0;
-	unsigned long new_anchor_vpn = 0;
-	unsigned long new_anchor_pfn = 0;
+	unsigned long scan_address = start_addr;
+	struct page *present_page = NULL;
 
 	/* Out of range query  */
 	if (start_addr >= vma->vm_end || start_addr < vma->vm_start)
@@ -1096,7 +1147,7 @@ static int find_anchor_pages_in_vma(struct mm_struct *mm,
 	 */
 	if (!RB_EMPTY_ROOT(&vma->anchor_page_rb.rb_root) &&
 		!interval_tree_iter_first(&vma->anchor_page_rb,
-		 vma->vm_start, vma->vm_end - PAGE_SIZE)) {
+		 vma->vm_start, vma->vm_end - 1)) {
 		struct interval_tree_node *node = NULL;
 
 		for (node = interval_tree_iter_first(&vma->anchor_page_rb,
@@ -1127,20 +1178,7 @@ static int find_anchor_pages_in_vma(struct mm_struct *mm,
 			return 0;
 		else if (existing_anchor->start < start_addr &&
 				 existing_anchor->last >= start_addr){
-			struct anchor_page_node *existing_node = container_of(existing_anchor,
-				struct anchor_page_node, node);
-			existing_anchor_pfn = existing_node->anchor_pfn;
-
-			pr_debug("Cut existing anchor: range: [%lx, %lx], anchor: vpn: %lx, pfn: %lx\n",
-				existing_anchor->start, existing_anchor->last,
-				existing_node->anchor_vpn, existing_node->anchor_pfn);
-			/* cut existing range, because some not movable pages  */
-			interval_tree_remove(existing_anchor, &vma->anchor_page_rb);
-			existing_anchor->last = start_addr - PAGE_SIZE;
-			interval_tree_insert(existing_anchor, &vma->anchor_page_rb);
-			/*  add a new range [start_addr, vm_end] */
-			end_addr = vma->vm_end - PAGE_SIZE;
-			goto insert_new_range;
+			return 0;
 		} else { /* a range after start_addr  */
 			VM_BUG_ON(!(existing_anchor->start > start_addr));
 			/* expand existing range forward  */
@@ -1175,6 +1213,17 @@ static int find_anchor_pages_in_vma(struct mm_struct *mm,
 	}
 
 insert_new_range: /* start_addr to end_addr  */
+	down_read(&vma->vm_mm->mmap_sem);
+	while (!present_page && scan_address < end_addr) {
+		present_page = follow_page(vma, scan_address,
+			FOLL_MIGRATION | FOLL_REMOTE);
+		scan_address += present_page?get_contig_page_size(present_page):PAGE_SIZE;
+	}
+	up_read(&vma->vm_mm->mmap_sem);
+
+	if (!present_page)
+		goto out;
+
 	anchor_node =
 			kmalloc(sizeof(struct anchor_page_node), GFP_KERNEL | __GFP_ZERO);
 	if (!anchor_node)
@@ -1183,36 +1232,17 @@ insert_new_range: /* start_addr to end_addr  */
 	anchor_node->node.start = start_addr;
 	anchor_node->node.last = end_addr;
 
-	/* use first available page  */
-	while (!anchor_page && scan_address < end_addr) {
-		down_read(&vma->vm_mm->mmap_sem);
-		anchor_page = follow_page(vma, scan_address,
-			FOLL_MIGRATION | FOLL_REMOTE);
-		up_read(&vma->vm_mm->mmap_sem);
-		scan_address += anchor_page?get_contig_page_size(anchor_page):PAGE_SIZE;
+	anchor_node->anchor_vpn = start_addr>>PAGE_SHIFT;
+	anchor_node->anchor_pfn = get_undefragged_area(page_to_nid(present_page),
+			vma, start_addr, end_addr);
 
-		if (anchor_page) {
-			new_anchor_vpn = (scan_address - get_contig_page_size(anchor_page))>>PAGE_SHIFT;
-			new_anchor_pfn = page_to_pfn(anchor_page);
+	if ((anchor_node->anchor_vpn & ((HPAGE_PUD_SIZE>>PAGE_SHIFT) - 1)) <
+		(anchor_node->anchor_pfn & ((HPAGE_PUD_SIZE>>PAGE_SHIFT) - 1)))
+		anchor_node->anchor_pfn += (HPAGE_PUD_SIZE>>PAGE_SHIFT);
 
-			new_anchor_vpn &= (PUD_MASK>>PAGE_SHIFT);
-			new_anchor_pfn &= (PUD_MASK>>PAGE_SHIFT);
+	anchor_node->anchor_pfn = (anchor_node->anchor_pfn & (PUD_MASK>>PAGE_SHIFT)) +
+		(anchor_node->anchor_vpn & ((HPAGE_PUD_SIZE>>PAGE_SHIFT) - 1));
 
-			if (existing_anchor_pfn &&
-				existing_anchor_pfn == new_anchor_pfn) {
-				anchor_page = NULL;
-				continue;
-			}
-		}
-	}
-
-	if (!anchor_page) {
-		kfree(anchor_node);
-		goto out;
-	}
-
-	anchor_node->anchor_vpn = new_anchor_vpn;
-	anchor_node->anchor_pfn = new_anchor_pfn;
 
 	interval_tree_insert(&anchor_node->node, &vma->anchor_page_rb);
 
@@ -1360,6 +1390,10 @@ static int kmem_defragd_scan_mm(struct defrag_scan_control *sc)
 			*scan_address = vstart;
 
 		if (sc->action == MEM_DEFRAG_DO_DEFRAG) {
+			/* only defrag large vma */
+			if (vma->vm_end - vma->vm_start < HPAGE_PUD_SIZE)
+				goto done_one_vma;
+
 			if (vma_scan_threshold_type == VMA_THRESHOLD_TYPE_TIME) {
 				if ((jiffies - vma->vma_create_jiffies) < sc->vma_scan_threshold)
 					goto done_one_vma;
