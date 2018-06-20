@@ -46,7 +46,8 @@ struct defrag_result_stats {
 	unsigned long dst_out_of_bound_failed;
 	unsigned long dst_pte_thp_failed;
 	unsigned long dst_thp_src_not_failed;
-	unsigned long dst_free_failed;
+	unsigned long dst_isolate_free_failed;
+	unsigned long dst_migrate_free_failed;
 	unsigned long dst_anon_failed;
 	unsigned long dst_file_failed;
 	unsigned long dst_non_lru_failed;
@@ -232,6 +233,24 @@ static void collect_mm_slot(struct mm_slot *mm_slot)
 		free_mm_slot(mm_slot);
 		mmdrop(mm);
 	}
+}
+
+static void print_page_stats(struct page *page, const char *reason)
+{
+	int mapcount = PageSlab(page) ? 0 : page_mapcount(page);
+
+	pr_debug("page:%px pfn:%lx count:%d mapcount:%d mapping:%px index:%#lx",
+		  page, page_to_pfn(page),
+		  page_ref_count(page), mapcount,
+		  page->mapping, page_to_pgoff(page));
+	if (PageCompound(page)) {
+		struct page *head = compound_head(page);
+		pr_debug(" compound_mapcount: %d, order: %d", compound_mapcount(page), compound_order(head));
+	}
+	pr_debug("\n");
+
+	pr_debug("flags: %#lx(%pGp)\n", page->flags, &page->flags);
+	pr_debug("reason: %s\n", reason);
 }
 
 static bool mem_defrag_vma_check(struct vm_area_struct *vma)
@@ -616,6 +635,7 @@ retry_isolate:
 			pagevec_flushed = 1;
 			goto retry_isolate;
 		}
+		print_page_stats(in_use_page, "isolate failed");
 		put_page(in_use_page);
 		in_use_page = NULL;
 	}
@@ -840,7 +860,7 @@ freepage_isolate_fail:
 
 				if (err < 0) {
 					failed += (page_size/PAGE_SIZE);
-					defrag_stats->dst_free_failed += (page_size/PAGE_SIZE);
+					defrag_stats->dst_isolate_free_failed += (page_size/PAGE_SIZE);
 
 					defrag_stats->not_defrag_vpn = scan_address + page_size;
 					goto quit_defrag;
@@ -869,7 +889,7 @@ freepage_isolate_fail:
 							&exchange_alloc_head.migratepage_list);
 
 				if (err) {
-					pr_debug("create_exchange_alloc_info error: %d\n", err);
+					pr_info("create_exchange_alloc_info error: %d\n", err);
 				}
 				exchange_alloc_head.num_freepages = 1<<scan_page_order;
 
@@ -897,7 +917,7 @@ freepage_isolate_fail:
 						1UL<<free_page_order, exchange_alloc_head.num_freepages);
 
 					failed += exchange_alloc_head.num_freepages;
-					defrag_stats->dst_free_failed += exchange_alloc_head.num_freepages;
+					defrag_stats->dst_migrate_free_failed += exchange_alloc_head.num_freepages;
 				}
 				defrag_stats->migrated += ((1UL<<scan_page_order) - exchange_alloc_head.num_freepages);
 
@@ -1544,8 +1564,8 @@ continue_defrag:
 						 * dst_misc_failed;
 						 */
 						used_len = scnprintf(stats_buf + pos, remain_buf_len,
-							"[0x%lx, 0x%lx):%lu [alig:%lu, migrated:%lu, src: not:%lu, src_thp_dst_not:%lu, src_pte_thp:%lu"
-							"dst: out_bound:%lu, dst_thp_src_not:%lu, dst_pte_thp:%lu, free:%lu, anon:%lu, file:%lu, non-lru:%lu, non-moveable:%lu], "
+							"[0x%lx, 0x%lx):%lu [alig:%lu, migrated:%lu, src: not:%lu, src_thp_dst_not:%lu, src_pte_thp:%lu "
+							"dst: out_bound:%lu, dst_thp_src_not:%lu, dst_pte_thp:%lu, isolate_free:%lu, migrate_free:%lu, anon:%lu, file:%lu, non-lru:%lu, non-moveable:%lu], "
 							"anchor: (%lx, %lx), range: [%lx, %lx], vma: 0x%lx, not_defrag_vpn: %lx\n",
 							*scan_address, defrag_sub_chunk_end,
 							(defrag_sub_chunk_end - *scan_address)/PAGE_SIZE,
@@ -1557,7 +1577,8 @@ continue_defrag:
 							defrag_stats.dst_out_of_bound_failed,
 							defrag_stats.dst_thp_src_not_failed,
 							defrag_stats.dst_pte_thp_failed,
-							defrag_stats.dst_free_failed,
+							defrag_stats.dst_isolate_free_failed,
+							defrag_stats.dst_migrate_free_failed,
 							defrag_stats.dst_anon_failed,
 							defrag_stats.dst_file_failed,
 							defrag_stats.dst_non_lru_failed,
