@@ -40,10 +40,12 @@ struct contig_stats {
 struct defrag_result_stats {
 	unsigned long aligned;
 	unsigned long migrated;
-	unsigned long src_compound_failed;
+	unsigned long src_pte_thp_failed;
+	unsigned long src_thp_dst_not_failed;
 	unsigned long src_not_present;
 	unsigned long dst_out_of_bound_failed;
-	unsigned long dst_compound_failed;
+	unsigned long dst_pte_thp_failed;
+	unsigned long dst_thp_src_not_failed;
 	unsigned long dst_free_failed;
 	unsigned long dst_anon_failed;
 	unsigned long dst_file_failed;
@@ -735,7 +737,7 @@ restart:
 		if (PageCompound(scan_page) && !src_thp) {
 			count_vm_events(MEM_DEFRAG_SRC_COMP_PAGES_FAILED, page_size/PAGE_SIZE);
 			failed += (page_size/PAGE_SIZE);
-			defrag_stats->src_compound_failed += (page_size/PAGE_SIZE);
+			defrag_stats->src_pte_thp_failed += (page_size/PAGE_SIZE);
 
 			defrag_stats->not_defrag_vpn = scan_address + page_size;
 			goto quit_defrag;
@@ -913,7 +915,7 @@ freepage_isolate_fail:
 
 				if (PageCompound(dest_page) && !dst_thp) {
 					failed += get_contig_page_size(dest_page);
-					defrag_stats->dst_compound_failed += 1;
+					defrag_stats->dst_pte_thp_failed += page_size/PAGE_SIZE;
 
 			defrag_stats->not_defrag_vpn = scan_address + page_size;
 			goto quit_defrag;
@@ -922,7 +924,10 @@ freepage_isolate_fail:
 
 				if (src_thp != dst_thp) {
 					failed += get_contig_page_size(scan_page);
-					defrag_stats->src_compound_failed += 1;
+					if (src_thp && !dst_thp)
+						defrag_stats->src_thp_dst_not_failed += page_size/PAGE_SIZE;
+					else /* !src_thp && dst_thp */
+						defrag_stats->dst_thp_src_not_failed += page_size/PAGE_SIZE;
 
 					defrag_stats->not_defrag_vpn = scan_address + page_size;
 					goto quit_defrag;
@@ -1539,17 +1544,19 @@ continue_defrag:
 						 * dst_misc_failed;
 						 */
 						used_len = scnprintf(stats_buf + pos, remain_buf_len,
-							"[0x%lx, 0x%lx):%lu [alig:%lu, migrated:%lu, src: not:%lu, compound:%lu, "
-							"dst: out_bound:%lu, compound:%lu, free:%lu, anon:%lu, file:%lu, non-lru:%lu, non-moveable:%lu], "
+							"[0x%lx, 0x%lx):%lu [alig:%lu, migrated:%lu, src: not:%lu, src_thp_dst_not:%lu, src_pte_thp:%lu"
+							"dst: out_bound:%lu, dst_thp_src_not:%lu, dst_pte_thp:%lu, free:%lu, anon:%lu, file:%lu, non-lru:%lu, non-moveable:%lu], "
 							"anchor: (%lx, %lx), range: [%lx, %lx], vma: 0x%lx, not_defrag_vpn: %lx\n",
 							*scan_address, defrag_sub_chunk_end,
 							(defrag_sub_chunk_end - *scan_address)/PAGE_SIZE,
 							defrag_stats.aligned,
 							defrag_stats.migrated,
 							defrag_stats.src_not_present,
-							defrag_stats.src_compound_failed,
+							defrag_stats.src_thp_dst_not_failed,
+							defrag_stats.src_pte_thp_failed,
 							defrag_stats.dst_out_of_bound_failed,
-							defrag_stats.dst_compound_failed,
+							defrag_stats.dst_thp_src_not_failed,
+							defrag_stats.dst_pte_thp_failed,
 							defrag_stats.dst_free_failed,
 							defrag_stats.dst_anon_failed,
 							defrag_stats.dst_file_failed,
