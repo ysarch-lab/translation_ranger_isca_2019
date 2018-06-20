@@ -1180,13 +1180,18 @@ static int find_anchor_pages_in_vma(struct mm_struct *mm,
 				 existing_anchor->last >= start_addr){
 			return 0;
 		} else { /* a range after start_addr  */
+			struct anchor_page_node *existing_node = container_of(existing_anchor,
+				struct anchor_page_node, node);
 			VM_BUG_ON(!(existing_anchor->start > start_addr));
 			/* expand existing range forward  */
 			interval_tree_remove(existing_anchor, &vma->anchor_page_rb);
-			existing_anchor->start = start_addr;
-			interval_tree_insert(existing_anchor, &vma->anchor_page_rb);
-
-			goto out;
+			kfree(existing_node);
+			VM_BUG_ON(!RB_EMPTY_ROOT(&vma->anchor_page_rb.rb_root));
+			/*existing_anchor->start = start_addr;*/
+			/*interval_tree_insert(existing_anchor, &vma->anchor_page_rb);*/
+			/*pr_info("vma spanned in the front\n");*/
+			/*goto out;*/
+			goto insert_new_range;
 		}
 	} else {
 		struct interval_tree_node *prev_anchor = NULL, *cur_anchor;
@@ -1240,8 +1245,18 @@ insert_new_range: /* start_addr to end_addr  */
 		(anchor_node->anchor_pfn & ((HPAGE_PUD_SIZE>>PAGE_SHIFT) - 1)))
 		anchor_node->anchor_pfn += (HPAGE_PUD_SIZE>>PAGE_SHIFT);
 
-	anchor_node->anchor_pfn = (anchor_node->anchor_pfn & (PUD_MASK>>PAGE_SHIFT)) +
+	anchor_node->anchor_pfn = (anchor_node->anchor_pfn & (PUD_MASK>>PAGE_SHIFT)) |
 		(anchor_node->anchor_vpn & ((HPAGE_PUD_SIZE>>PAGE_SHIFT) - 1));
+	if (!(anchor_node->anchor_pfn <  node_end_pfn(page_to_nid(present_page)) &&
+		anchor_node->anchor_pfn >=  node_start_pfn(page_to_nid(present_page)))) {
+		pr_info("anchor pfn %lx out of range[%lx, %lx]\n", anchor_node->anchor_pfn,
+			node_start_pfn(page_to_nid(present_page)),
+			node_end_pfn(page_to_nid(present_page)));
+		if (anchor_node->anchor_pfn >=  node_end_pfn(page_to_nid(present_page)))
+			anchor_node->anchor_pfn -= (HPAGE_PUD_SIZE>>PAGE_SHIFT);
+		if (anchor_node->anchor_pfn <  node_start_pfn(page_to_nid(present_page)))
+			anchor_node->anchor_pfn += (HPAGE_PUD_SIZE>>PAGE_SHIFT);
+	}
 
 
 	interval_tree_insert(&anchor_node->node, &vma->anchor_page_rb);
