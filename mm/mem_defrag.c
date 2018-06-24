@@ -1277,9 +1277,9 @@ insert_new_range: /* start_addr to end_addr  */
 		pr_info("anchor pfn %lx out of range[%lx, %lx]\n", anchor_node->anchor_pfn,
 			node_start_pfn(page_to_nid(present_page)),
 			node_end_pfn(page_to_nid(present_page)));
-		if (anchor_node->anchor_pfn >=  node_end_pfn(page_to_nid(present_page)))
+		while (anchor_node->anchor_pfn >=  node_end_pfn(page_to_nid(present_page)))
 			anchor_node->anchor_pfn -= (HPAGE_PUD_SIZE>>PAGE_SHIFT);
-		if (anchor_node->anchor_pfn <  node_start_pfn(page_to_nid(present_page)))
+		while (anchor_node->anchor_pfn <  node_start_pfn(page_to_nid(present_page)))
 			anchor_node->anchor_pfn += (HPAGE_PUD_SIZE>>PAGE_SHIFT);
 	}
 
