@@ -1098,13 +1098,14 @@ unsigned long get_undefragged_area(int nid, struct vm_area_struct *vma,
 	struct mm_struct *mm = vma->vm_mm;
 	struct vm_area_struct *scan_vma = NULL;
 	unsigned long vma_size = end_addr - start_addr;
+	bool first_vma = true;
 
 	for (scan_vma = mm->mmap; scan_vma; scan_vma = scan_vma->vm_next)
 		if (!RB_EMPTY_ROOT(&scan_vma->anchor_page_rb.rb_root))
 			break;
 	/* no defragged area */
 	if (!scan_vma)
-		return NODE_DATA(nid)->node_start_pfn;
+		return node_start_pfn(nid);
 
 	scan_vma = mm->mmap;
 	while (scan_vma) {
@@ -1121,6 +1122,21 @@ unsigned long get_undefragged_area(int nid, struct vm_area_struct *vma,
 			anchor_node = container_of(node, struct anchor_page_node, node);
 			end_pfn = (anchor_node->anchor_pfn +
 					((scan_vma->vm_end - scan_vma->vm_start)>>PAGE_SHIFT));
+
+			/* check space before first vma */
+			if (first_vma) {
+				first_vma = false;
+				if (node_start_pfn(nid) + vma_size < anchor_node->anchor_pfn)
+					return node_start_pfn(nid);
+				/* remove existing anchor if new vma is much larger */
+				if (vma_size > (scan_vma->vm_end - scan_vma->vm_start)*2) {
+					first_vma = true;
+					interval_tree_remove(node, &scan_vma->anchor_page_rb);
+					kfree(anchor_node);
+					scan_vma = scan_vma->vm_next;
+					continue;
+				}
+			}
 
 			/* find next vma with anchor range */
 			for (next_vma = scan_vma->vm_next;
@@ -1142,7 +1158,7 @@ unsigned long get_undefragged_area(int nid, struct vm_area_struct *vma,
 			scan_vma = scan_vma->vm_next;
 	}
 
-	return NODE_DATA(nid)->node_start_pfn;
+	return node_start_pfn(nid);
 }
 
 /*
