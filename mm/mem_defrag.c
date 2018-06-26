@@ -1282,21 +1282,41 @@ insert_new_range: /* start_addr to end_addr  */
 	anchor_node->anchor_pfn = get_undefragged_area(page_to_nid(present_page),
 			vma, start_addr, end_addr);
 
-	if ((anchor_node->anchor_vpn & ((HPAGE_PUD_SIZE>>PAGE_SHIFT) - 1)) <
-		(anchor_node->anchor_pfn & ((HPAGE_PUD_SIZE>>PAGE_SHIFT) - 1)))
-		anchor_node->anchor_pfn += (HPAGE_PUD_SIZE>>PAGE_SHIFT);
-
-	anchor_node->anchor_pfn = (anchor_node->anchor_pfn & (PUD_MASK>>PAGE_SHIFT)) |
-		(anchor_node->anchor_vpn & ((HPAGE_PUD_SIZE>>PAGE_SHIFT) - 1));
-	if (!(anchor_node->anchor_pfn <  node_end_pfn(page_to_nid(present_page)) &&
-		anchor_node->anchor_pfn >=  node_start_pfn(page_to_nid(present_page)))) {
-		pr_info("anchor pfn %lx out of range[%lx, %lx]\n", anchor_node->anchor_pfn,
-			node_start_pfn(page_to_nid(present_page)),
-			node_end_pfn(page_to_nid(present_page)));
-		while (anchor_node->anchor_pfn >=  node_end_pfn(page_to_nid(present_page)))
-			anchor_node->anchor_pfn -= (HPAGE_PUD_SIZE>>PAGE_SHIFT);
-		while (anchor_node->anchor_pfn <  node_start_pfn(page_to_nid(present_page)))
+	/* adjust alignment accordingly */
+	if (vma->vm_end - vma->vm_start >= HPAGE_PUD_SIZE) {
+		if ((anchor_node->anchor_vpn & ((HPAGE_PUD_SIZE>>PAGE_SHIFT) - 1)) <
+			(anchor_node->anchor_pfn & ((HPAGE_PUD_SIZE>>PAGE_SHIFT) - 1)))
 			anchor_node->anchor_pfn += (HPAGE_PUD_SIZE>>PAGE_SHIFT);
+
+		anchor_node->anchor_pfn = (anchor_node->anchor_pfn & (PUD_MASK>>PAGE_SHIFT)) |
+			(anchor_node->anchor_vpn & ((HPAGE_PUD_SIZE>>PAGE_SHIFT) - 1));
+		if (!(anchor_node->anchor_pfn <  node_end_pfn(page_to_nid(present_page)) &&
+			anchor_node->anchor_pfn >=  node_start_pfn(page_to_nid(present_page)))) {
+			pr_info("anchor pfn %lx out of range[%lx, %lx]\n", anchor_node->anchor_pfn,
+				node_start_pfn(page_to_nid(present_page)),
+				node_end_pfn(page_to_nid(present_page)));
+			while (anchor_node->anchor_pfn >=  node_end_pfn(page_to_nid(present_page)))
+				anchor_node->anchor_pfn -= (HPAGE_PUD_SIZE>>PAGE_SHIFT);
+			while (anchor_node->anchor_pfn <  node_start_pfn(page_to_nid(present_page)))
+				anchor_node->anchor_pfn += (HPAGE_PUD_SIZE>>PAGE_SHIFT);
+		}
+	} else if (vma->vm_end - vma->vm_start >= HPAGE_PMD_SIZE) {
+		if ((anchor_node->anchor_vpn & ((HPAGE_PMD_SIZE>>PAGE_SHIFT) - 1)) <
+			(anchor_node->anchor_pfn & ((HPAGE_PMD_SIZE>>PAGE_SHIFT) - 1)))
+			anchor_node->anchor_pfn += (HPAGE_PMD_SIZE>>PAGE_SHIFT);
+
+		anchor_node->anchor_pfn = (anchor_node->anchor_pfn & (PMD_MASK>>PAGE_SHIFT)) |
+			(anchor_node->anchor_vpn & ((HPAGE_PMD_SIZE>>PAGE_SHIFT) - 1));
+		if (!(anchor_node->anchor_pfn <  node_end_pfn(page_to_nid(present_page)) &&
+			anchor_node->anchor_pfn >=  node_start_pfn(page_to_nid(present_page)))) {
+			pr_info("anchor pfn %lx out of range[%lx, %lx]\n", anchor_node->anchor_pfn,
+				node_start_pfn(page_to_nid(present_page)),
+				node_end_pfn(page_to_nid(present_page)));
+			while (anchor_node->anchor_pfn >=  node_end_pfn(page_to_nid(present_page)))
+				anchor_node->anchor_pfn -= (HPAGE_PMD_SIZE>>PAGE_SHIFT);
+			while (anchor_node->anchor_pfn <  node_start_pfn(page_to_nid(present_page)))
+				anchor_node->anchor_pfn += (HPAGE_PMD_SIZE>>PAGE_SHIFT);
+		}
 	}
 
 
@@ -1446,10 +1466,9 @@ static int kmem_defragd_scan_mm(struct defrag_scan_control *sc)
 			*scan_address = vstart;
 
 		if (sc->action == MEM_DEFRAG_DO_DEFRAG) {
-			/* only defrag large vma */
-			if (vma->vm_end - vma->vm_start < HPAGE_PUD_SIZE)
+			if (vma->vm_end - vma->vm_start < 5*HPAGE_PMD_SIZE) {
 				goto done_one_vma;
-
+			}
 			if (vma_scan_threshold_type == VMA_THRESHOLD_TYPE_TIME) {
 				if ((jiffies - vma->vma_create_jiffies) < sc->vma_scan_threshold)
 					goto done_one_vma;
