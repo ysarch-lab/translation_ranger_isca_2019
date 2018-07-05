@@ -465,7 +465,10 @@ exchange_mappings:
 		rc = exchange_page_move_mapping(to_page_mapping, from_page_mapping,
 							to_page, from_page, NULL, NULL, mode, 0, 0);
 	} else {
-		if (to_page_mapping->a_ops->migratepage == buffer_migrate_page) {
+		/* shmem */
+		if (to_page_mapping->a_ops->migratepage == migrate_page)
+			goto exchange_mappings;
+		else if (to_page_mapping->a_ops->migratepage == buffer_migrate_page) {
 			if (!page_has_buffers(to_page))
 				goto exchange_mappings;
 
