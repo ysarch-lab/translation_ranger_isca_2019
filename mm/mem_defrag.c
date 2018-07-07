@@ -61,12 +61,18 @@ enum {
 	VMA_THRESHOLD_TYPE_SIZE,
 };
 
+#define PROMOTE_PMD_MAP  (0x8)
+#define PROMOTE_PMD_PAGE (0x4)
+#define PROMOTE_PUD_MAP  (0x2)
+#define PROMOTE_PUD_PAGE (0x1)
+
 int num_breakout_chunks = 0;
 int vma_scan_percentile = 100;
 int vma_scan_threshold_type = VMA_THRESHOLD_TYPE_TIME;
 int vma_no_repeat_defrag = 0;
 int kmem_defragd_always;
 int mem_defrag_promote_1gb_thp = 0;
+int mem_defrag_promote_thp = (PROMOTE_PMD_MAP|PROMOTE_PMD_PAGE);
 static DEFINE_SPINLOCK(kmem_defragd_mm_lock);
 
 #define MM_SLOTS_HASH_BITS 10
@@ -1710,9 +1716,9 @@ continue_defrag:
 							goto continue_defrag;
 						}
 					} else {
-#if 1
 						/* defrag works for the whole chunk, promote to PMD THP in place */
-						if (!defrag_result &&
+						if ((mem_defrag_promote_thp & PROMOTE_PMD_PAGE) &&
+							!defrag_result &&
 							defrag_stats.aligned_max_order < HPAGE_PMD_ORDER && /* avoid existing THP */
 							!(*scan_address & (HPAGE_PMD_SIZE-1)) &&
 							!(defrag_sub_chunk_end & (HPAGE_PMD_SIZE-1))) {
@@ -1721,12 +1727,12 @@ continue_defrag:
 							down_write(&mm->mmap_sem);
 							if (!(ret = promote_huge_page_address(vma, *scan_address))) {
 								pr_debug("promote huge pmd page successful!\n");
-								if (!(ret = promote_huge_pmd_address(vma, *scan_address)))
+								if ((mem_defrag_promote_thp & PROMOTE_PMD_MAP) &&
+									!(ret = promote_huge_pmd_address(vma, *scan_address)))
 									pr_debug("2MB THP created!\n");
 							}
 							up_write(&mm->mmap_sem);
 						}
-#endif
 						/* skip PUD pages */
 						if (defrag_stats.aligned_max_order == HPAGE_PUD_ORDER) {
 							*scan_address = defrag_end;
@@ -1742,10 +1748,9 @@ continue_defrag:
 						goto breakouterloop;
 					}
 				}
-
-#if 1
 				/* defrag works for the whole chunk, promote to PUD THP in place */
-				if (!nr_fails_in_1gb_range &&
+				if ((mem_defrag_promote_thp & PROMOTE_PUD_PAGE) &&
+					!nr_fails_in_1gb_range &&
 					!skip_promotion && /* avoid existing THP */
 					!(defrag_begin & (HPAGE_PUD_SIZE-1)) &&
 					!(defrag_end & (HPAGE_PUD_SIZE-1))) {
@@ -1754,12 +1759,11 @@ continue_defrag:
 					down_write(&mm->mmap_sem);
 					if (!(ret = promote_huge_pud_page_address(vma, defrag_begin))) {
 						pr_debug("promote huge pud page successful!\n");
-						if (mem_defrag_promote_1gb_thp && !(ret = promote_huge_pud_address(vma, defrag_begin)))
+						if ((mem_defrag_promote_thp & PROMOTE_PUD_MAP) && !(ret = promote_huge_pud_address(vma, defrag_begin)))
 							pr_debug("1GB THP created!\n");
 					}
 					up_write(&mm->mmap_sem);
 				}
-#endif
 			}
 		}
 done_one_vma:

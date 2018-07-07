@@ -121,6 +121,7 @@ extern int vma_no_repeat_defrag;
 extern int num_breakout_chunks;
 extern int khugepaged_daemon;
 extern int mem_defrag_promote_1gb_thp;
+extern int mem_defrag_promote_thp;
 
 extern int only_print_head_pfn;
 
@@ -135,6 +136,7 @@ static int zero;
 static int __maybe_unused one = 1;
 static int __maybe_unused two = 2;
 static int __maybe_unused four = 4;
+static int __maybe_unused fifteen = 15;
 static unsigned long one_ul = 1;
 static int one_hundred = 100;
 static int one_thousand = 1000;
@@ -1723,13 +1725,13 @@ static struct ctl_table vm_table[] = {
 		.extra2		= &one,
 	},
 	{
-		.procname	= "mem_defrag_promote_1gb_thp",
-		.data		= &mem_defrag_promote_1gb_thp,
-		.maxlen		= sizeof(mem_defrag_promote_1gb_thp),
+		.procname	= "mem_defrag_promote_thp",
+		.data		= &mem_defrag_promote_thp,
+		.maxlen		= sizeof(mem_defrag_promote_thp),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_minmax,
 		.extra1		= &zero,
-		.extra2		= &one,
+		.extra2		= &fifteen,
 	},
 	{ }
 };
