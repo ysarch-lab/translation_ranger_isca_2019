@@ -569,6 +569,10 @@ void expand(struct zone *zone, struct page *page,
 	int low, int high, struct free_area *area,
 	int migratetype);
 
+int expand_free_page(struct zone *zone, struct page *buddy_head,
+	struct page *page, int buddy_order, int page_order, struct free_area *area,
+	int migratetype);
+
 void prep_new_page(struct page *page, unsigned int order, gfp_t gfp_flags,
 							unsigned int alloc_flags);
 

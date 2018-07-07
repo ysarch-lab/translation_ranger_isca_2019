@@ -635,7 +635,7 @@ retry_isolate:
 			pagevec_flushed = 1;
 			goto retry_isolate;
 		}
-		print_page_stats(in_use_page, "isolate failed");
+		/*print_page_stats(in_use_page, "isolate failed");*/
 		put_page(in_use_page);
 		in_use_page = NULL;
 	}
@@ -792,13 +792,17 @@ restart:
 			}
 
 retry_defrag:
-			/* migrate */
-			if (PageBuddy(dest_page)) {
+				/* free pages */
+			if (page_count(dest_page) == 0 && dest_page->mapping == NULL){
+				int buddy_page_order = 0;
+				unsigned long pfn = page_to_pfn(dest_page);
+				unsigned long buddy_pfn;
+				struct page *buddy = dest_page;
 				struct zone *zone = page_zone(dest_page);
 				spinlock_t *zone_lock = &zone->lock;
 				unsigned long zone_lock_flags;
 				unsigned long free_page_order = 0;
-				int err = 0;
+				int err = 0, expand_err = 0;
 				struct exchange_alloc_head exchange_alloc_head = {0};
 				int migratetype = get_pageblock_migratetype(dest_page);
 
@@ -806,17 +810,42 @@ retry_defrag:
 				INIT_LIST_HEAD(&exchange_alloc_head.freelist);
 				INIT_LIST_HEAD(&exchange_alloc_head.migratepage_list);
 
-				count_vm_events(MEM_DEFRAG_DST_FREE_PAGES, 1<<scan_page_order);
+				/* not managed pages  */
+				if (!dest_page->flags) {
+					failed += 1;
+					defrag_stats->dst_out_of_bound_failed += 1;
 
+					defrag_stats->not_defrag_vpn = scan_address + page_size;
+					goto quit_defrag;
+				}
+				/* spill order-0 pages to buddy allocator from pcplist */
+				if (!PageBuddy(dest_page) && !page_drained) {
+					drain_all_pages(zone);
+					page_drained = 1;
+					goto retry_defrag;
+				}
 				/* lock page_zone(dest_page)->lock  */
 				spin_lock_irqsave(zone_lock, zone_lock_flags);
 
-				if (!PageBuddy(dest_page)) {
+				while (!PageBuddy(buddy) && buddy_page_order < MAX_ORDER) {
+					buddy_pfn = pfn & ~((1<<buddy_page_order) - 1);
+					buddy = dest_page - (pfn - buddy_pfn);
+					buddy_page_order++;
+				}
+				if (!PageBuddy(buddy)) {
 					err = -EINVAL;
 					goto freepage_isolate_fail;
 				}
 
-				free_page_order = page_order(dest_page);
+				count_vm_events(MEM_DEFRAG_DST_FREE_PAGES, 1<<scan_page_order);
+
+				free_page_order = page_order(buddy);
+
+				/* caught some transient-state page */
+				if (free_page_order < buddy_page_order) {
+					err = -ENOMEM;
+					goto freepage_isolate_fail;
+				}
 
 				/* fail early if not enough free pages */
 				if (free_page_order < scan_page_order) {
@@ -846,13 +875,15 @@ retry_defrag:
 					page_to_pfn(dest_page), free_page_order);
 
 				/* __isolate_free_page()  */
-				err = isolate_free_page_no_wmark(dest_page, free_page_order);
+				err = isolate_free_page_no_wmark(buddy, free_page_order);
 				if (!err)
 					goto freepage_isolate_fail;
 
-				expand(zone, dest_page, scan_page_order, free_page_order,
-					&(zone->free_area[free_page_order]),
+				expand_err = expand_free_page(zone, buddy, dest_page, free_page_order,
+					scan_page_order, &(zone->free_area[free_page_order]),
 					migratetype);
+				if (expand_err)
+					goto freepage_isolate_fail;
 
 				if (!is_migrate_isolate(migratetype))
 					__mod_zone_freepage_state(zone, -(1UL << scan_page_order), migratetype);
@@ -1017,25 +1048,6 @@ split_dst_done:
 					compound_order(dest_page)
 					);
 
-				/* free page on pcplist */
-				if (page_count(dest_page) == 0){
-					/* not managed pages  */
-					if (!dest_page->flags) {
-						failed += 1;
-						defrag_stats->dst_out_of_bound_failed += 1;
-
-			defrag_stats->not_defrag_vpn = scan_address + page_size;
-			goto quit_defrag;
-						continue;
-					}
-					/* spill order-0 pages to buddy allocator from pcplist */
-					if (!page_drained) {
-						drain_all_pages(NULL);
-						page_drained = 1;
-						goto retry_defrag;
-					}
-				}
-
 				if (PageAnon(dest_page)) {
 					count_vm_events(MEM_DEFRAG_DST_ANON_PAGES, 1<<scan_page_order);
 
@@ -1048,6 +1060,7 @@ split_dst_done:
 						count_vm_events(MEM_DEFRAG_DST_ANON_PAGES_FAILED, 1<<scan_page_order);
 						failed += 1<<scan_page_order;
 						defrag_stats->dst_anon_failed += 1<<scan_page_order;
+						print_page_stats(dest_page, "anonymous page");
 					}
 				} else if (page_mapping(dest_page)) {
 					count_vm_events(MEM_DEFRAG_DST_FILE_PAGES, 1<<scan_page_order);
@@ -1058,6 +1071,7 @@ split_dst_done:
 						count_vm_events(MEM_DEFRAG_DST_FILE_PAGES_FAILED, 1<<scan_page_order);
 						failed += 1<<scan_page_order;
 						defrag_stats->dst_file_failed += 1<<scan_page_order;
+						print_page_stats(dest_page, "file-backed page");
 					}
 				} else if (!PageLRU(dest_page) && __PageMovable(dest_page)) {
 					err = -ENODEV;
@@ -1065,12 +1079,14 @@ split_dst_done:
 					failed += 1<<scan_page_order;
 					defrag_stats->dst_non_lru_failed += 1<<scan_page_order;
 					count_vm_events(MEM_DEFRAG_DST_NONLRU_PAGES_FAILED, 1<<scan_page_order);
+					print_page_stats(dest_page, "non-lru page");
 					pr_debug("non-lru movable page exchange\n");
 				} else {
 					err = -ENODEV;
 					failed += 1<<scan_page_order;
 					/* unmovable pages  */
 					defrag_stats->dst_non_moveable_failed += 1<<scan_page_order;
+					print_page_stats(dest_page, "nonmovable page");
 					pr_debug("unmovable pages exchange\n");
 				}
 				pr_debug("exchange result: %d\n", err);

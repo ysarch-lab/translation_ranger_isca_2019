@@ -1751,6 +1751,62 @@ inline void expand(struct zone *zone, struct page *page,
 	}
 }
 
+inline int expand_free_page(struct zone *zone, struct page *buddy_head,
+	struct page *page, int buddy_order, int page_order, struct free_area *area,
+	int migratetype)
+{
+	unsigned long size = 1 << buddy_order;
+
+	/*VM_BUG_ON(!(page >= buddy_head && page < (buddy_head + (1<<buddy_order))));*/
+	if (!(page >= buddy_head && page < (buddy_head + (1<<buddy_order)))) {
+		int mapcount = PageSlab(buddy_head) ? 0 : page_mapcount(buddy_head);
+		pr_info("buddy_order: %d\n", buddy_order);
+		pr_info("buddy:%px pfn:%lx count:%d mapcount:%d mapping:%px index:%#lx",
+			  buddy_head, page_to_pfn(buddy_head),
+			  page_ref_count(buddy_head), mapcount,
+			  buddy_head->mapping, page_to_pgoff(buddy_head));
+		pr_info("flags: %#lx(%pGp)\n", buddy_head->flags, &buddy_head->flags);
+		mapcount = PageSlab(page) ? 0 : page_mapcount(page);
+		pr_info("page:%px pfn:%lx count:%d mapcount:%d mapping:%px index:%#lx",
+			  page, page_to_pfn(page),
+			  page_ref_count(page), mapcount,
+			  page->mapping, page_to_pgoff(page));
+		pr_info("flags: %#lx(%pGp)\n", page->flags, &page->flags);
+
+		__free_one_page(buddy_head, page_to_pfn(buddy_head), zone, buddy_order,
+				migratetype);
+		return -EINVAL;
+	}
+
+	while (buddy_order > page_order) {
+		struct page *page_to_free;
+		area--;
+		buddy_order--;
+		size >>= 1;
+
+		if (page < (buddy_head + size))
+			page_to_free = buddy_head + size;
+		else {
+			page_to_free = buddy_head;
+			buddy_head = buddy_head + size;
+		}
+
+		/*
+		 * Mark as guard pages (or page), that will allow to
+		 * merge back to allocator when buddy will be freed.
+		 * Corresponding page table entries will not be touched,
+		 * pages will stay not present in virtual address space
+		 */
+		if (set_page_guard(zone, page_to_free, buddy_order, migratetype))
+			continue;
+
+		list_add(&page_to_free->lru, &area->free_list[migratetype]);
+		area->nr_free++;
+		set_page_order(page_to_free, buddy_order);
+	}
+	return 0;
+}
+
 static void check_new_page_bad(struct page *page)
 {
 	const char *bad_reason = NULL;
