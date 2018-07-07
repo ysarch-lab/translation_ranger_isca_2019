@@ -751,7 +751,8 @@ restart:
 		if ((scan_page == compound_head(scan_page)) &&
 			PageTransHuge(scan_page) && !PageHuge(scan_page)) {
 			src_thp = true;
-		}
+		} else
+			src_thp = false;
 
 		/* Allow THPs  */
 		if (PageCompound(scan_page) && !src_thp) {
@@ -932,6 +933,8 @@ freepage_isolate_fail:
 				if ((dest_page == compound_head(dest_page)) &&
 					PageTransHuge(dest_page) && !PageHuge(dest_page))
 					dst_thp = true;
+				else
+					dst_thp = false;
 
 				if (PageCompound(dest_page) && !dst_thp) {
 					failed += get_contig_page_size(dest_page);
@@ -944,10 +947,41 @@ freepage_isolate_fail:
 
 				if (src_thp != dst_thp) {
 					failed += get_contig_page_size(scan_page);
-					if (src_thp && !dst_thp)
-						defrag_stats->src_thp_dst_not_failed += page_size/PAGE_SIZE;
-					else /* !src_thp && dst_thp */
-						defrag_stats->dst_thp_src_not_failed += page_size/PAGE_SIZE;
+					if (src_thp && !dst_thp) {
+						int ret;
+						get_page(scan_page);
+						lock_page(scan_page);
+						if (!PageCompound(scan_page)) {
+							ret = 0;
+							src_thp = false;
+							goto split_src_done;
+						}
+						ret = split_huge_page(scan_page);
+split_src_done:
+						unlock_page(scan_page);
+						put_page(scan_page);
+						if (ret)
+							defrag_stats->src_thp_dst_not_failed += page_size/PAGE_SIZE;
+						else
+							goto restart;
+					} else {/* !src_thp && dst_thp */
+						int ret;
+						get_page(dest_page);
+						lock_page(dest_page);
+						if (!PageCompound(dest_page)) {
+							ret = 0;
+							dst_thp = false;
+							goto split_dst_done;
+						}
+						ret = split_huge_page(dest_page);
+split_dst_done:
+						unlock_page(dest_page);
+						put_page(dest_page);
+						if (ret)
+							defrag_stats->dst_thp_src_not_failed += page_size/PAGE_SIZE;
+						else
+							goto retry_defrag;
+					}
 
 					defrag_stats->not_defrag_vpn = scan_address + page_size;
 					goto quit_defrag;
