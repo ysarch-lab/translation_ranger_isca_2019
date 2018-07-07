@@ -820,8 +820,20 @@ retry_defrag:
 
 				/* fail early if not enough free pages */
 				if (free_page_order < scan_page_order) {
-					err = -ENOMEM;
-					goto freepage_isolate_fail;
+					int ret;
+					spin_unlock_irqrestore(zone_lock, zone_lock_flags);
+
+					get_page(scan_page);
+					lock_page(scan_page);
+					ret = split_huge_page(scan_page);
+					unlock_page(scan_page);
+					put_page(scan_page);
+					if (ret) {
+						err = -ENOMEM;
+						goto freepage_isolate_fail_unlocked;
+					} else {
+						goto restart;
+					}
 				}
 
 				pr_debug("defrag: vma: %p, [0x%lx, 0x%lx): vaddr: 0x%lx to 0x%lx, origin page: 0x%lx, dest free page: 0x%lx, order: %lu\n",
@@ -858,7 +870,7 @@ retry_defrag:
 
 freepage_isolate_fail:
 				spin_unlock_irqrestore(zone_lock, zone_lock_flags);
-
+freepage_isolate_fail_unlocked:
 				if (err < 0) {
 					failed += (page_size/PAGE_SIZE);
 					defrag_stats->dst_isolate_free_failed += (page_size/PAGE_SIZE);
