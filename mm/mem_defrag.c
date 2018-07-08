@@ -245,18 +245,47 @@ static void print_page_stats(struct page *page, const char *reason)
 {
 	int mapcount = PageSlab(page) ? 0 : page_mapcount(page);
 
-	pr_debug("page:%px pfn:%lx count:%d mapcount:%d mapping:%px index:%#lx",
+	DEFINE_DYNAMIC_DEBUG_METADATA(descriptor, "print_page_stats");
+	if (!DYNAMIC_DEBUG_BRANCH(descriptor))
+		return;
+
+	pr_info("page:%px pfn:%lx count:%d mapcount:%d mapping:%px index:%#lx",
 		  page, page_to_pfn(page),
 		  page_ref_count(page), mapcount,
 		  page->mapping, page_to_pgoff(page));
 	if (PageCompound(page)) {
 		struct page *head = compound_head(page);
-		pr_debug(" compound_mapcount: %d, order: %d", compound_mapcount(page), compound_order(head));
+		pr_info(" compound_mapcount: %d, order: %d", compound_mapcount(page), compound_order(head));
 	}
-	pr_debug("\n");
+	pr_info("\n");
 
-	pr_debug("flags: %#lx(%pGp)\n", page->flags, &page->flags);
-	pr_debug("reason: %s\n", reason);
+	pr_info("flags: %#lx(%pGp)\n", page->flags, &page->flags);
+
+	if (page_mapping(page)) {
+		struct address_space *as = page_mapping(page);
+		pgoff_t pgoff_start, pgoff_end;
+		struct vm_area_struct *vma;
+
+		pgoff_start = page_to_pgoff(page);
+		pgoff_end = pgoff_start + hpage_nr_pages(page) - 1;
+		pr_info("inode number: %lu\n", as->host->i_ino);
+		i_mmap_lock_read(as);
+		vma_interval_tree_foreach(vma, &as->i_mmap,
+				pgoff_start, pgoff_end) {
+			pr_info("vma: %px\n", vma);
+			if (vma->vm_file) {
+				char buf[256] = {0};
+				char *res_buf;
+				res_buf = d_path(&vma->vm_file->f_path, buf, 256);
+				if (!IS_ERR(res_buf))
+					pr_info("file: %s\n", res_buf);
+			}
+		}
+
+		i_mmap_unlock_read(as);
+	}
+
+	pr_info("reason: %s\n", reason);
 }
 
 static bool mem_defrag_vma_check(struct vm_area_struct *vma)
@@ -1066,7 +1095,7 @@ split_dst_done:
 						count_vm_events(MEM_DEFRAG_DST_ANON_PAGES_FAILED, 1<<scan_page_order);
 						failed += 1<<scan_page_order;
 						defrag_stats->dst_anon_failed += 1<<scan_page_order;
-						print_page_stats(dest_page, "anonymous page");
+						/*print_page_stats(dest_page, "anonymous page");*/
 					}
 				} else if (page_mapping(dest_page)) {
 					count_vm_events(MEM_DEFRAG_DST_FILE_PAGES, 1<<scan_page_order);
@@ -1085,14 +1114,14 @@ split_dst_done:
 					failed += 1<<scan_page_order;
 					defrag_stats->dst_non_lru_failed += 1<<scan_page_order;
 					count_vm_events(MEM_DEFRAG_DST_NONLRU_PAGES_FAILED, 1<<scan_page_order);
-					print_page_stats(dest_page, "non-lru page");
+					/*print_page_stats(dest_page, "non-lru page");*/
 					pr_debug("non-lru movable page exchange\n");
 				} else {
 					err = -ENODEV;
 					failed += 1<<scan_page_order;
 					/* unmovable pages  */
 					defrag_stats->dst_non_moveable_failed += 1<<scan_page_order;
-					print_page_stats(dest_page, "nonmovable page");
+					/*print_page_stats(dest_page, "nonmovable page");*/
 					pr_debug("unmovable pages exchange\n");
 				}
 				pr_debug("exchange result: %d\n", err);
