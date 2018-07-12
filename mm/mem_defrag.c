@@ -72,6 +72,7 @@ int vma_scan_threshold_type = VMA_THRESHOLD_TYPE_TIME;
 int vma_no_repeat_defrag = 0;
 int kmem_defragd_always;
 int mem_defrag_promote_1gb_thp = 0;
+int defrag_size_threshold = 5;
 int mem_defrag_promote_thp = (PROMOTE_PMD_MAP|PROMOTE_PMD_PAGE);
 static DEFINE_SPINLOCK(kmem_defragd_mm_lock);
 
@@ -1563,7 +1564,7 @@ static int kmem_defragd_scan_mm(struct defrag_scan_control *sc)
 			*scan_address = vstart;
 
 		if (sc->action == MEM_DEFRAG_DO_DEFRAG) {
-			if (vma->vm_end - vma->vm_start < 5*HPAGE_PMD_SIZE) {
+			if (vma->vm_end - vma->vm_start < defrag_size_threshold*HPAGE_PMD_SIZE) {
 				goto done_one_vma;
 			}
 			if (vma_scan_threshold_type == VMA_THRESHOLD_TYPE_TIME) {

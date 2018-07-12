@@ -122,6 +122,7 @@ extern int num_breakout_chunks;
 extern int khugepaged_daemon;
 extern int mem_defrag_promote_1gb_thp;
 extern int mem_defrag_promote_thp;
+extern int defrag_size_threshold;
 
 extern int only_print_head_pfn;
 
@@ -1732,6 +1733,14 @@ static struct ctl_table vm_table[] = {
 		.proc_handler	= proc_dointvec_minmax,
 		.extra1		= &zero,
 		.extra2		= &fifteen,
+	},
+	{
+		.procname	= "defrag_size_threshold",
+		.data		= &defrag_size_threshold,
+		.maxlen		= sizeof(defrag_size_threshold),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &zero,
 	},
 	{ }
 };
