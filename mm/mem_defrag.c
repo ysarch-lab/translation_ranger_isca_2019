@@ -888,6 +888,10 @@ retry_defrag:
 					int ret;
 					spin_unlock_irqrestore(zone_lock, zone_lock_flags);
 
+					if (is_huge_zero_page(scan_page)) {
+						err = -ENOMEM;
+						goto freepage_isolate_fail_unlocked;
+					}
 					get_page(scan_page);
 					lock_page(scan_page);
 					ret = split_huge_page(scan_page);
@@ -1030,7 +1034,7 @@ freepage_isolate_fail_unlocked:
 						int ret;
 						get_page(scan_page);
 						lock_page(scan_page);
-						if (!PageCompound(scan_page)) {
+						if (!PageCompound(scan_page) || is_huge_zero_page(scan_page)) {
 							ret = 0;
 							src_thp = false;
 							goto split_src_done;
@@ -1047,7 +1051,7 @@ split_src_done:
 						int ret;
 						get_page(dest_page);
 						lock_page(dest_page);
-						if (!PageCompound(dest_page)) {
+						if (!PageCompound(dest_page) || is_huge_zero_page(dest_page)) {
 							ret = 0;
 							dst_thp = false;
 							goto split_dst_done;
