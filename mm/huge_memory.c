@@ -4437,8 +4437,11 @@ static int __promote_huge_page_isolate(struct vm_area_struct *vma,
 			goto out;
 		}
 
-		if (address == haddr)
+		if (address == haddr) {
 			*head = page;
+			if (page_to_pfn(page) & ((1<<HPAGE_PMD_ORDER) - 1))
+				goto out;
+		}
 
 		if ((*head + (address - haddr)/PAGE_SIZE) != page)
 			goto out;
@@ -4899,8 +4902,11 @@ static int __promote_huge_pud_page_isolate(struct vm_area_struct *vma,
 			goto out;
 		}
 
-		if (address == haddr)
+		if (address == haddr) {
 			*head = page;
+			if (page_to_pfn(page) & ((1<<HPAGE_PUD_ORDER) - 1))
+				goto out;
+		}
 
 		if ((*head + (address - haddr)/PAGE_SIZE) != page)
 			goto out;
