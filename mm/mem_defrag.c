@@ -803,7 +803,7 @@ restart:
 
 		VM_BUG_ON(!anchor_page);
 
-		page_dist = (scan_address - page_vaddr) / PAGE_SIZE;
+		page_dist = ((long long)scan_address - page_vaddr) / PAGE_SIZE;
 
 		/* already in the contiguous pos  */
 		if (page_dist == (long long)(scan_page - anchor_page)) {
@@ -817,8 +817,8 @@ restart:
 			bool dst_thp = false;
 			int scan_page_order = src_thp?compound_order(scan_page):0;
 
-			if (zone_end_pfn(page_zone(anchor_page)) <= (page_to_pfn(anchor_page) + page_dist) ||
-				page_zone(anchor_page)->zone_start_pfn > (page_to_pfn(anchor_page) + page_dist)) {
+			if (!zone_spans_pfn(page_zone(anchor_page),
+					(page_to_pfn(anchor_page) + page_dist))) {
 				failed += 1;
 				defrag_stats->dst_out_of_bound_failed += 1;
 
