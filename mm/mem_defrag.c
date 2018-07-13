@@ -1411,7 +1411,7 @@ insert_new_range: /* start_addr to end_addr  */
 		alignment_size = PAGE_SIZE;
 
 	if (!(zone_spans_pfn(present_zone, anchor_node->anchor_pfn))) {
-		pr_info("%s anchor pfn %lx out of range[%lx, %lx]\n",
+		pr_info_ratelimited("%s anchor pfn %lx out of range[%lx, %lx]\n",
 			alignment_size == HPAGE_PUD_SIZE?"GB":
 			(alignment_size == HPAGE_PMD_SIZE?"MB":
 			 (alignment_size == PAGE_SIZE?"KB":"Unknown alignment")),
