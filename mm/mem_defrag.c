@@ -1190,7 +1190,7 @@ unsigned long get_aligned_pfn(unsigned long vpn, unsigned long lower_pfn,
 	return ((lower_pfn + offset_mask + 1) & aligned_mask) | vpn_offset;
 }
 
-unsigned long get_undefragged_area(int nid, struct vm_area_struct *vma,
+unsigned long get_undefragged_area(struct zone *zone, struct vm_area_struct *vma,
 	unsigned long start_addr, unsigned long end_addr)
 {
 	struct mm_struct *mm = vma->vm_mm;
@@ -1203,7 +1203,7 @@ unsigned long get_undefragged_area(int nid, struct vm_area_struct *vma,
 			break;
 	/* no defragged area */
 	if (!scan_vma)
-		return node_start_pfn(nid);
+		return zone->zone_start_pfn;
 
 	scan_vma = mm->mmap;
 	while (scan_vma) {
@@ -1224,8 +1224,8 @@ unsigned long get_undefragged_area(int nid, struct vm_area_struct *vma,
 			/* check space before first vma */
 			if (first_vma) {
 				first_vma = false;
-				if (node_start_pfn(nid) + vma_size < anchor_node->anchor_pfn)
-					return node_start_pfn(nid);
+				if (zone->zone_start_pfn + vma_size < anchor_node->anchor_pfn)
+					return zone->zone_start_pfn;
 				/* remove existing anchor if new vma is much larger */
 				if (vma_size > (scan_vma->vm_end - scan_vma->vm_start)*2) {
 					first_vma = true;
@@ -1256,7 +1256,7 @@ unsigned long get_undefragged_area(int nid, struct vm_area_struct *vma,
 			scan_vma = scan_vma->vm_next;
 	}
 
-	return node_start_pfn(nid);
+	return zone->zone_start_pfn;
 }
 
 /*
@@ -1271,6 +1271,8 @@ static int find_anchor_pages_in_vma(struct mm_struct *mm,
 	struct interval_tree_node *existing_anchor = NULL;
 	unsigned long scan_address = start_addr;
 	struct page *present_page = NULL;
+	struct zone *present_zone = NULL;
+	unsigned long alignment_size = PAGE_SIZE;
 
 	/* Out of range query  */
 	if (start_addr >= vma->vm_end || start_addr < vma->vm_start)
@@ -1373,11 +1375,13 @@ insert_new_range: /* start_addr to end_addr  */
 	if (!anchor_node)
 		return -ENOMEM;
 
+	present_zone = page_zone(present_page);
+
 	anchor_node->node.start = start_addr;
 	anchor_node->node.last = end_addr;
 
 	anchor_node->anchor_vpn = start_addr>>PAGE_SHIFT;
-	anchor_node->anchor_pfn = get_undefragged_area(page_to_nid(present_page),
+	anchor_node->anchor_pfn = get_undefragged_area(present_zone,
 			vma, start_addr, end_addr);
 
 	/* adjust alignment accordingly */
@@ -1388,16 +1392,8 @@ insert_new_range: /* start_addr to end_addr  */
 
 		anchor_node->anchor_pfn = (anchor_node->anchor_pfn & (PUD_MASK>>PAGE_SHIFT)) |
 			(anchor_node->anchor_vpn & ((HPAGE_PUD_SIZE>>PAGE_SHIFT) - 1));
-		if (!(anchor_node->anchor_pfn <  node_end_pfn(page_to_nid(present_page)) &&
-			anchor_node->anchor_pfn >=  node_start_pfn(page_to_nid(present_page)))) {
-			pr_info("anchor pfn %lx out of range[%lx, %lx]\n", anchor_node->anchor_pfn,
-				node_start_pfn(page_to_nid(present_page)),
-				node_end_pfn(page_to_nid(present_page)));
-			while (anchor_node->anchor_pfn >=  node_end_pfn(page_to_nid(present_page)))
-				anchor_node->anchor_pfn -= (HPAGE_PUD_SIZE>>PAGE_SHIFT);
-			while (anchor_node->anchor_pfn <  node_start_pfn(page_to_nid(present_page)))
-				anchor_node->anchor_pfn += (HPAGE_PUD_SIZE>>PAGE_SHIFT);
-		}
+
+		alignment_size = HPAGE_PUD_SIZE;
 	} else if (vma->vm_end - vma->vm_start >= HPAGE_PMD_SIZE) {
 		if ((anchor_node->anchor_vpn & ((HPAGE_PMD_SIZE>>PAGE_SHIFT) - 1)) <
 			(anchor_node->anchor_pfn & ((HPAGE_PMD_SIZE>>PAGE_SHIFT) - 1)))
@@ -1405,16 +1401,23 @@ insert_new_range: /* start_addr to end_addr  */
 
 		anchor_node->anchor_pfn = (anchor_node->anchor_pfn & (PMD_MASK>>PAGE_SHIFT)) |
 			(anchor_node->anchor_vpn & ((HPAGE_PMD_SIZE>>PAGE_SHIFT) - 1));
-		if (!(anchor_node->anchor_pfn <  node_end_pfn(page_to_nid(present_page)) &&
-			anchor_node->anchor_pfn >=  node_start_pfn(page_to_nid(present_page)))) {
-			pr_info("anchor pfn %lx out of range[%lx, %lx]\n", anchor_node->anchor_pfn,
-				node_start_pfn(page_to_nid(present_page)),
-				node_end_pfn(page_to_nid(present_page)));
-			while (anchor_node->anchor_pfn >=  node_end_pfn(page_to_nid(present_page)))
-				anchor_node->anchor_pfn -= (HPAGE_PMD_SIZE>>PAGE_SHIFT);
-			while (anchor_node->anchor_pfn <  node_start_pfn(page_to_nid(present_page)))
-				anchor_node->anchor_pfn += (HPAGE_PMD_SIZE>>PAGE_SHIFT);
-		}
+
+		alignment_size = HPAGE_PMD_SIZE;
+	} else
+		alignment_size = PAGE_SIZE;
+
+	if (!(zone_spans_pfn(present_zone, anchor_node->anchor_pfn))) {
+		pr_info("%s anchor pfn %lx out of range[%lx, %lx]\n",
+			alignment_size == HPAGE_PUD_SIZE?"GB":
+			(alignment_size == HPAGE_PMD_SIZE?"MB":
+			 (alignment_size == PAGE_SIZE?"KB":"Unknown alignment")),
+			anchor_node->anchor_pfn,
+			present_zone->zone_start_pfn,
+			zone_end_pfn(present_zone));
+		while (anchor_node->anchor_pfn >= zone_end_pfn(present_zone))
+			anchor_node->anchor_pfn -= alignment_size / PAGE_SHIFT;
+		while (anchor_node->anchor_pfn <  present_zone->zone_start_pfn)
+			anchor_node->anchor_pfn += alignment_size / PAGE_SHIFT;
 	}
 
 
