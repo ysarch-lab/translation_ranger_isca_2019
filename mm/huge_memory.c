@@ -39,6 +39,7 @@
 #include <asm/pgalloc.h>
 #include "internal.h"
 
+int break_1gb_alllocation = 0;
 /*
  * By default, transparent hugepage support is disabled in order to avoid
  * risking an increased memory footprint for applications that are not
@@ -1037,6 +1038,15 @@ static int __do_huge_pud_anonymous_page(struct vm_fault *vmf, struct page *page,
 			mm_inc_nr_ptes(vma->vm_mm);
 		spin_unlock(vmf->ptl);
 		count_vm_event(THP_FAULT_ALLOC_PUD);
+		if (break_1gb_alllocation == 1)
+			split_huge_pud_address(vma, haddr, false, NULL);
+		else if (break_1gb_alllocation == 2) {
+			get_page(page);
+			lock_page(page);
+			split_huge_pud_page(page);
+			unlock_page(page);
+			put_page(page);
+		}
 	}
 
 	return 0;
@@ -1117,6 +1127,8 @@ int do_huge_pud_anonymous_page(struct vm_fault *vmf)
 				set_huge_pud_zero_page(virt_to_page(pmd_pgtable),
 					vma->vm_mm, vma, haddr, vmf->pud, zero_page);
 				spin_unlock(vmf->ptl);
+				if (break_1gb_alllocation)
+					split_huge_pud_address(vma, haddr, false, NULL);
 				set = true;
 			}
 		} else
@@ -1773,6 +1785,15 @@ alloc:
 		ret |= VM_FAULT_WRITE;
 	}
 	spin_unlock(vmf->ptl);
+	if (break_1gb_alllocation == 1)
+		split_huge_pud_address(vma, haddr, false, NULL);
+	else if (break_1gb_alllocation == 2) {
+		get_page(new_page);
+		lock_page(new_page);
+		split_huge_pud_page(new_page);
+		unlock_page(new_page);
+		put_page(new_page);
+	}
 out_mn:
 	/*
 	 * No need to double call mmu_notifier->invalidate_range() callback as

@@ -125,6 +125,7 @@ extern int mem_defrag_promote_thp;
 extern int defrag_size_threshold;
 
 extern int only_print_head_pfn;
+extern int break_1gb_alllocation;
 
 /* Constants used for minimum and  maximum */
 #ifdef CONFIG_LOCKUP_DETECTOR
@@ -1738,6 +1739,14 @@ static struct ctl_table vm_table[] = {
 		.procname	= "defrag_size_threshold",
 		.data		= &defrag_size_threshold,
 		.maxlen		= sizeof(defrag_size_threshold),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &zero,
+	},
+	{
+		.procname	= "break_1gb_alllocation",
+		.data		= &break_1gb_alllocation,
+		.maxlen		= sizeof(break_1gb_alllocation),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_minmax,
 		.extra1		= &zero,
