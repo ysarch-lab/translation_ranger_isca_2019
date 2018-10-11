@@ -1603,6 +1603,38 @@ config SLAB_FREELIST_HARDENED
 	  sacrifies to harden the kernel slab allocator against common
 	  freelist exploit methods.
 
+config SHUFFLE_PAGE_ALLOCATOR
+	bool "Page allocator randomization"
+	default SLAB_FREELIST_RANDOM
+	help
+	  Randomization of the page allocator is both a security feature
+	  and a performance feature on platforms that have a
+	  direct-mapped memory side cache. See section 5.2.27
+	  Heterogeneous Memory Attribute Table (HMAT) in the ACPI 6.2a
+	  specification for an example of how a platform advertises the
+	  presence of a memory side cache. For the security
+	  benefits of this capability it is expected to be paired with
+	  SLAB_FREELIST_RANDOM as that adds local randomization for
+	  small objects while SHUFFLE_PAGE_ALLOCATOR adds randomization at
+	  SHUFFLE_PAGE_ORDER granularities. The runtime impact of the
+	  shuffling is negligible. The performance implications of not
+	  shuffling are significant on platforms with a direct-mapped
+	  memory-side cache.
+
+	  Say Y if unsure.
+
+config SHUFFLE_PAGE_ORDER
+	depends on SHUFFLE_PAGE_ALLOCATOR
+	int "Page allocator shuffle order"
+	range 0 10
+	default 10
+	help
+	  Specify the granularity at which shuffling (randomization) is
+	  performed. By default this is set to MAX_ORDER-1 to minimize
+	  runtime impact of randomization and with the expectation that
+	  SLAB_FREELIST_RANDOM mitigates heap attacks on smaller
+	  object granularities.
+
 config SLUB_CPU_PARTIAL
 	default y
 	depends on SLUB && SMP

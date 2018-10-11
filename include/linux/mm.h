@@ -1994,6 +1994,23 @@ extern void mem_init_print_info(const char *str);
 
 extern void reserve_bootmem_region(phys_addr_t start, phys_addr_t end);
 
+#ifdef CONFIG_SHUFFLE_PAGE_ALLOCATOR
+extern void shuffle_free_memory(pg_data_t *pgdat, unsigned long start_pfn,
+		unsigned long end_pfn);
+extern void shuffle_zone(struct zone *z, unsigned long start_pfn,
+		unsigned long end_pfn);
+#else
+static inline void shuffle_free_memory(pg_data_t *pgdat, unsigned long start_pfn,
+		unsigned long end_pfn)
+{
+}
+
+static inline void shuffle_zone(struct zone *z, unsigned long start_pfn,
+		unsigned long end_pfn)
+{
+}
+#endif
+
 /* Free the reserved page into the buddy system, so it gets managed. */
 static inline void __free_reserved_page(struct page *page)
 {

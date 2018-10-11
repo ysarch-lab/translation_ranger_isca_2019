@@ -171,6 +171,7 @@ static unsigned long __init free_all_bootmem_core(bootmem_data_t *bdata)
 {
 	struct page *page;
 	unsigned long *map, start, end, pages, cur, count = 0;
+	pg_data_t *pgdat;
 
 	if (!bdata->node_bootmem_map)
 		return 0;
@@ -237,6 +238,10 @@ static unsigned long __init free_all_bootmem_core(bootmem_data_t *bdata)
 	bdata->node_bootmem_map = NULL;
 
 	bdebug("nid=%td released=%lx\n", bdata - bootmem_node_data, count);
+
+	for_each_online_pgdat(pgdat)
+		shuffle_free_memory(pgdat, PHYS_PFN(start),
+				PHYS_PFN(end));
 
 	return count;
 }

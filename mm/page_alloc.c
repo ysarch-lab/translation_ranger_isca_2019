@@ -1640,6 +1640,8 @@ static int __init deferred_init_memmap(void *data)
 		deferred_free_pages(nid, zid, spfn, epfn);
 	}
 
+	shuffle_zone(zone, first_init_pfn, zone_end_pfn(zone));
+
 	/* Sanity check that the next zone really is unpopulated */
 	WARN_ON(++zid < MAX_NR_ZONES && populated_zone(++zone));
 
