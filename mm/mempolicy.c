@@ -2010,7 +2010,8 @@ alloc_pages_vma(gfp_t gfp, int order, struct vm_area_struct *vma,
 			mpol_cond_put(pol);
 			page = __alloc_pages_node(hpage_node,
 						gfp | __GFP_THISNODE, order);
-			goto out;
+			if (page)
+				goto out;
 		}
 	}
 
