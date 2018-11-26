@@ -742,6 +742,15 @@ static void exchange_free(struct page *freepage, unsigned long data)
 		head->num_freepages++;
 }
 
+static bool page_can_migrate(struct page *page)
+{
+	if (PageAnon(page))
+		return true;
+	if (page_mapping(page))
+		return true;
+	return false;
+}
+
 int defrag_address_range(struct mm_struct *mm, struct vm_area_struct *vma,
 		unsigned long start_addr, unsigned long end_addr,
 		struct page *anchor_page, unsigned long page_vaddr,
@@ -1029,9 +1038,14 @@ freepage_isolate_fail_unlocked:
 				}
 
 				if (src_thp != dst_thp) {
-					failed += get_contig_page_size(scan_page);
 					if (src_thp && !dst_thp) {
 						int ret;
+						if (!page_can_migrate(dest_page)) {
+							failed += get_contig_page_size(scan_page);
+							defrag_stats->not_defrag_vpn = scan_address + page_size;
+							goto quit_defrag;
+						}
+
 						get_page(scan_page);
 						lock_page(scan_page);
 						if (!PageCompound(scan_page) || is_huge_zero_page(scan_page)) {
@@ -1066,6 +1080,7 @@ split_dst_done:
 							goto retry_defrag;
 					}
 
+					failed += get_contig_page_size(scan_page);
 					defrag_stats->not_defrag_vpn = scan_address + page_size;
 					goto quit_defrag;
 					/*continue;*/
