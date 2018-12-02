@@ -586,7 +586,13 @@ static inline int PageTransTail(struct page *page)
 #define HPAGE_PUD_ORDER (HPAGE_PUD_SHIFT-PAGE_SHIFT)
 #define HPAGE_PUD_NR (1<<HPAGE_PUD_ORDER)
 
-static inline unsigned int compound_order(struct page *page);
+static inline unsigned int compound_order(struct page *page)
+{
+	if (!PageHead(page))
+		return 0;
+	return page[1].compound_order;
+}
+
 
 static inline int PMDPageInPUD(struct page *page)
 {
