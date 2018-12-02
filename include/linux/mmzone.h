@@ -98,6 +98,8 @@ extern int page_group_by_mobility_disabled;
 struct free_area {
 	struct list_head	free_list[MIGRATE_TYPES];
 	unsigned long		nr_free;
+	u64			rand;
+	u8			rand_bits;
 };
 
 /* Used for pages not on another list */
@@ -115,6 +117,14 @@ static inline void add_to_free_area_tail(struct page *page, struct free_area *ar
 	list_add_tail(&page->lru, &area->free_list[migratetype]);
 	area->nr_free++;
 }
+
+#ifdef CONFIG_SHUFFLE_PAGE_ALLOCATOR
+/* Used to preserve page allocation order entropy */
+void add_to_free_area_random(struct page *page, struct free_area *area,
+		int migratetype);
+#else
+#define add_to_free_area_random add_to_free_area
+#endif
 
 /* Used for pages which are on another list */
 static inline void move_to_free_area(struct page *page, struct free_area *area,

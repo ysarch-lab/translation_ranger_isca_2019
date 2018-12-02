@@ -1989,6 +1989,11 @@ extern void shuffle_free_memory(pg_data_t *pgdat, unsigned long start_pfn,
 		unsigned long end_pfn);
 extern void shuffle_zone(struct zone *z, unsigned long start_pfn,
 		unsigned long end_pfn);
+
+static inline bool is_shuffle_order(int order)
+{
+	return order >= CONFIG_SHUFFLE_PAGE_ORDER;
+}
 #else
 static inline void shuffle_free_memory(pg_data_t *pgdat, unsigned long start_pfn,
 		unsigned long end_pfn)
@@ -1998,6 +2003,11 @@ static inline void shuffle_free_memory(pg_data_t *pgdat, unsigned long start_pfn
 static inline void shuffle_zone(struct zone *z, unsigned long start_pfn,
 		unsigned long end_pfn)
 {
+}
+
+static inline bool is_shuffle_order(int order)
+{
+	return false;
 }
 #endif
 
