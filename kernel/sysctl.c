@@ -127,6 +127,12 @@ extern int defrag_size_threshold;
 extern int only_print_head_pfn;
 extern int break_1gb_alllocation;
 
+#ifdef CONFIG_SHUFFLE_PAGE_ALLOCATOR
+int sysctl_shuffle_order = -1;
+
+static int max_order = MAX_ORDER;
+#endif
+
 /* Constants used for minimum and  maximum */
 #ifdef CONFIG_LOCKUP_DETECTOR
 static int sixty = 60;
@@ -1750,6 +1756,15 @@ static struct ctl_table vm_table[] = {
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_minmax,
 		.extra1		= &zero,
+	},
+	{
+		.procname	= "shuffle_order",
+		.data		= &sysctl_shuffle_order,
+		.maxlen		= sizeof(sysctl_shuffle_order),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &neg_one,
+		.extra2		= &max_order,
 	},
 	{ }
 };

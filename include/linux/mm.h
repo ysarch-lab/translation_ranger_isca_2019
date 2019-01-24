@@ -1985,6 +1985,8 @@ extern void mem_init_print_info(const char *str);
 extern void reserve_bootmem_region(phys_addr_t start, phys_addr_t end);
 
 #ifdef CONFIG_SHUFFLE_PAGE_ALLOCATOR
+extern int sysctl_shuffle_order;
+
 extern void shuffle_free_memory(pg_data_t *pgdat, unsigned long start_pfn,
 		unsigned long end_pfn);
 extern void shuffle_zone(struct zone *z, unsigned long start_pfn,
@@ -1992,7 +1994,7 @@ extern void shuffle_zone(struct zone *z, unsigned long start_pfn,
 
 static inline bool is_shuffle_order(int order)
 {
-	return order >= CONFIG_SHUFFLE_PAGE_ORDER;
+	return order >= (sysctl_shuffle_order != -1?sysctl_shuffle_order:CONFIG_SHUFFLE_PAGE_ORDER);
 }
 #else
 static inline void shuffle_free_memory(pg_data_t *pgdat, unsigned long start_pfn,
