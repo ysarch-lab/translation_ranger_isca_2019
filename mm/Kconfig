@@ -265,6 +265,15 @@ config ARCH_ENABLE_HUGEPAGE_MIGRATION
 config ARCH_ENABLE_THP_MIGRATION
 	bool
 
+config TRANSLATION_RANGER
+    bool
+    def_bool y
+    select ARCH_ENABLE_THP_MIGRATION
+    select TRANSPARENT_HUGEPAGE
+    select MEMCG
+    select MEMCG_SWAP
+    select SHUFFLE_PAGE_ALLOCATOR
+
 config PHYS_ADDR_T_64BIT
 	def_bool 64BIT || ARCH_PHYS_ADDR_T_64BIT
 
