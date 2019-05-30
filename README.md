@@ -1,3 +1,19 @@
+Compile the kernel
+============
+
+Use `make menuconfig` and select `TRANSLATION_RANGER`, which help select
+necessary kernel modules. (Use `/` to search for the option)
+
+Related information
+============
+
+This is the kernel of "Translation Ranger: Operating System Support for
+Contiguity-Aware TLBs". Its companion userspace applications can be find at:
+https://github.com/ysarch-lab/translation_ranger_userspace.
+
+Technical details on the kernel are documented at:
+https://normal.zone/blog/2019-06-24-translation-ranger/.
+
 Linux kernel
 ============
 
